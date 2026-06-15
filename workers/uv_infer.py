@@ -11,7 +11,7 @@ import os, sys, argparse
 import numpy as np
 import torch
 
-_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root (workers/ → ..)
 sys.path.insert(0, _ROOT)
 
 ap = argparse.ArgumentParser()

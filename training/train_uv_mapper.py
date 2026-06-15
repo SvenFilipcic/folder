@@ -23,7 +23,7 @@ Usage:
 """
 
 import sys, os, math, copy, argparse
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (training/ → ..)
 from config import resolve_data_dir
 
 import torch
@@ -82,7 +82,7 @@ if args.data is None:
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 partial_dir    = os.path.join(args.data, "partial")
-CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), "checkpoints")
+CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "checkpoints")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 OVERFIT = args.overfit > 0

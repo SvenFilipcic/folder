@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import yaml
 
-_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root (franka_legacy/ → ..)
 
 
 # ── preprocessing (mirrors UVMapperDataset.__getitem__ exactly) ───────────────────────────

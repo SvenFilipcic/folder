@@ -23,7 +23,7 @@ Usage:
 
 import os, sys, json, argparse, subprocess
 
-_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root (franka_legacy/ → ..)
 
 
 def parse_args():
@@ -104,7 +104,7 @@ def _run_generation(args):
 # ── step 2: run inference in the infer conda env ─────────────────────────────────────────
 def _run_inference(npz_path, args):
     """Call infer_grasp.py via conda run in the infer env, returns result dict or None."""
-    infer_script = os.path.join(_ROOT, "infer_grasp.py")
+    infer_script = os.path.join(_ROOT, "franka_legacy", "infer_grasp.py")
     out_path     = args.grasp_out if os.path.isabs(args.grasp_out) \
                    else os.path.join(_ROOT, args.grasp_out)
     cfg_path     = args.config  or os.path.join(_ROOT, "grasp_config.yaml")

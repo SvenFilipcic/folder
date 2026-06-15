@@ -363,7 +363,7 @@ def _run_rl_infer(tmp_npz, tmp_json):
     mdl_path    = args.model  or os.path.join(_ROOT, "checkpoints", "uv_mapper_best.pth")
     policy_path = args.rl_policy or os.path.join(_ROOT, "checkpoints", "rl_policy.pth")
     cmd = ["conda", "run", "-n", args.infer_env, "--no-capture-output",
-           "python", os.path.join(_ROOT, "rl_infer.py"),
+           "python", os.path.join(_ROOT, "workers", "rl_infer.py"),
            "--npz",    tmp_npz,
            "--out",    tmp_json,
            "--model",  mdl_path,
@@ -484,7 +484,7 @@ def _run_uv_infer(state_npz, uv_out):
     """Run UV Mapper (no policy) → (N,2) UV predictions saved to uv_out. Returns path or None."""
     mdl_path = args.model or os.path.join(_ROOT, "checkpoints", "uv_mapper_best.pth")
     cmd = ["conda", "run", "-n", args.infer_env, "--no-capture-output",
-           "python", os.path.join(_ROOT, "uv_infer.py"),
+           "python", os.path.join(_ROOT, "workers", "uv_infer.py"),
            "--npz",   state_npz,
            "--out",   uv_out,
            "--model", mdl_path]
@@ -596,7 +596,7 @@ def _run_vlm_action(state_npz):
     overlay  = _render_uv_overlay(state_npz, uv_out, rgb_path)
     print(f"[vla] UV overlay → {overlay}")
 
-    cmd = ["python", os.path.join(_ROOT, "vlm_action.py"),
+    cmd = ["python", os.path.join(_ROOT, "workers", "vlm_action.py"),
            "--image", overlay,
            "--out",   tmp_out]
     ret = subprocess.run(cmd, cwd=_ROOT, env=os.environ)
@@ -640,7 +640,7 @@ def _vlm_score(image_path):
     """Call vlm_reward.py subprocess. Returns float [0,1] or 0.0 on failure."""
     import tempfile
     out_json = os.path.join(tempfile.gettempdir(), "vlm_score.json")
-    cmd = ["python", os.path.join(_ROOT, "vlm_reward.py"),
+    cmd = ["python", os.path.join(_ROOT, "workers", "vlm_reward.py"),
            "--image", image_path,
            "--out",   out_json]
     ret = subprocess.run(cmd, cwd=_ROOT, env=os.environ)
@@ -686,7 +686,7 @@ def _training_step(buf_path):
     """Call rl_update.py in infer env to do one REINFORCE gradient step."""
     policy_path = args.rl_policy or os.path.join(_ROOT, "checkpoints", "rl_policy.pth")
     cmd = ["conda", "run", "-n", args.infer_env, "--no-capture-output",
-           "python", os.path.join(_ROOT, "rl_update.py"),
+           "python", os.path.join(_ROOT, "workers", "rl_update.py"),
            "--buffer", buf_path,
            "--k",      str(args.rl_k),
            "--policy", policy_path]
