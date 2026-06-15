@@ -1,0 +1,23 @@
+# grasp_config.yaml — priority-ordered grasp PAIRS for the majca garment
+#
+# Pairs are tried in order. Both points in a pair must be visible + match for the
+# pair to be accepted. Single-point fallback (karkol) has only 'a'.
+#
+# Fields per group:
+#   name      : label for logging
+#   panel     : 0 = front only, 1 = back only, 2 = accept either
+#   uv_center : [u, v] centre of the target region in UV space
+#   uv_radius : radius in UV space
+
+grasp_pairs:
+
+  - name: gornji_rob
+    a: {name: desni_rob,  panel: 0, uv_center: [0.6907, 0.0818], uv_radius: 0.1}
+    b: {name: levi_rob,   panel: 0, uv_center: [0.3230, 0.0764], uv_radius: 0.1}
+
+  - name: rokavi
+    a: {name: densi_rokav, panel: 1, uv_center: [0.1939, 0.2769], uv_radius: 0.08}
+    b: {name: levi_rokav,  panel: 1, uv_center: [0.8123, 0.2970], uv_radius: 0.08}
+
+  - name: karkol
+    a: {name: karkol, panel: 2, uv_center: [0.50, 0.50], uv_radius: 0.50}

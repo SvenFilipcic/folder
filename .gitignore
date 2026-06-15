@@ -1,0 +1,32 @@
+# ── Markdown docs kept local only (not tracked) ──
+*.md
+
+# ── IsaacLab: cloned separately on each machine (see PORTING.md), pip -e installed ──
+/IsaacLab/
+
+# ── Large / machine-local assets — transfer via rsync, NOT git ──
+# checkpoints: *.pth UV-mapper / policy weights (~180 MB)
+/checkpoints/
+# assets: garment USD (*.usdc) + remeshed OBJ — never in git
+/assets/
+# data: generated datasets (~30 MB), but KEEP the data-gen .py scripts
+/data/*
+!/data/*.py
+
+# ── Generated runtime state & captures (regenerated every run) ──
+/il_dataset/
+/__pycache__/
+**/__pycache__/
+*.pyc
+rl_buffer.json
+grasp_result.json
+m0_status.json
+rl_capture_latest.png
+rl_reward_img.png
+rl_uv_overlay.png
+vlm_action_prompt_latest.txt
+/style3d_grasp_preview.npz
+Screenshot*.png
+/tmp/
+
+# keep reference/*.npz (flat-UV + mesh-graph, small + runtime-critical) — do NOT ignore
