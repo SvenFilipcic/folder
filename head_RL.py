@@ -52,6 +52,7 @@ parser.add_argument("--arm-box-cx",      type=float, default=0.0,  help="world X
 parser.add_argument("--arm-box-cy",      type=float, default=0.0,  help="world Y centre of the workspace box (cloth spawn Y)")
 parser.add_argument("--arm-box-zmax",    type=float, default=0.5,  help="max height (m) above the table a waypoint may reach")
 parser.add_argument("--recovery-step",   type=float, default=0.3,  help="when the policy's grab falls OUTSIDE the workspace box, the fallback grabs the nearest in-box cloth point and drags it this far (m) toward the box centre to pull the garment back into reach")
+parser.add_argument("--max-drag-len",    type=float, default=0.8,  help="cap on a single drag's total path length (m). A random/aggressive multi-waypoint path is scaled down toward the grab so it can't stretch the cloth past what the solver handles (blow-up → black screen). Real arms can't yank that far either")
 parser.add_argument("--grab-radius-min", type=float, default=0.01, help="min grab patch radius (m)")
 parser.add_argument("--grab-radius-max", type=float, default=0.03, help="max grab patch radius (m)")
 parser.add_argument("--grab-radius",     type=float, default=0.008, help="grasp PINCH radius (m): cloth verts within this of the grab point get pinned. ~0.008 ≈ robot fingertip pinch (~15 verts); 0.03 = broad hand grab (~200). Applies to manual + RL/VLA execution")
@@ -625,6 +626,14 @@ def _execute_drag_path(arm, pcd_to_mesh, centroid):
 
     traj = np.array([grab_world] + [to_world(p) for p in arm["path"]] + [to_world(arm["release"])],
                     dtype=np.float32)
+
+    # cap total drag length: a random/aggressive multi-waypoint path can sum to metres and tear the
+    # cloth (solver blow-up → black screen). Scale every waypoint uniformly toward the grab so the
+    # polyline length ≤ --max-drag-len; waypoint count (and quat alignment) is preserved.
+    seg_len = float(np.linalg.norm(np.diff(traj, axis=0), axis=1).sum())
+    if seg_len > args.max_drag_len:
+        traj = (grab_world + (traj - grab_world) * (args.max_drag_len / seg_len)).astype(np.float32)
+        print(f"[vla] drag path {seg_len:.2f}m → capped to {args.max_drag_len:g}m")
 
     # orientation keyframes aligned 1:1 with traj. Grab keyframe = first waypoint's orientation (no
     # reorientation on the grab→first-waypoint leg); the rest are the model's per-waypoint quats.
