@@ -73,6 +73,7 @@ parser.add_argument("--rl-epochs",     type=int,   default=4,    help="(--rl-stu
 parser.add_argument("--rl-ent-weight", type=float, default=1e-3, help="(--rl-student) entropy bonus weight (exploration)")
 parser.add_argument("--rl-vf-weight",  type=float, default=0.5,  help="(--rl-student) critic (value) loss weight")
 parser.add_argument("--rl-det-critic", action="store_true", help="(--rl-student) use the EXACT potential-based critic V(s)=phi_target-Φ(s) from the stored 'phi' instead of the learned value head (which is random with no IL value-pretraining). Use for the from-scratch RL sanity run; switch off once you've BC/value-pretrained on demos")
+parser.add_argument("--no-rot",        action="store_true", help="FREEZE wrist rotation: pure-translation drags, rotation excluded from the PPO objective. For the position-only sanity pass before rotation is trusted. Without it, rotation is a bounded swing-twist RL action (≤30° off vertical, free roll) learned alongside position")
 parser.add_argument("--student-eval",   action="store_true", help="EVAL the StudentVLA: load the checkpoint, run GREEDY (deterministic) actions and watch — no sampling, no learning, no logging. Add --gui to see it live in Isaac; saves rl_flat_overlay.png each step")
 parser.add_argument("--rl-settle",    type=int,   default=80,  help="settle frames after each drag")
 parser.add_argument("--rl-drag-fr",   type=int,   default=60,  help="(RL mode) fixed frames to execute drag motion")
@@ -456,6 +457,8 @@ def _run_student_infer(state_npz, out_json, greedy=False):
            "--npz", state_npz, "--out", out_json, "--policy", policy_path, "--model", mdl_path]
     if greedy:
         cmd.append("--greedy")
+    if args.no_rot:
+        cmd.append("--no-rot")
     ret = subprocess.run(cmd, cwd=_ROOT, env=os.environ)
     if ret.returncode != 0 or not os.path.exists(out_json):
         print("[student] student_infer.py failed"); return None
@@ -1482,6 +1485,7 @@ if args.rl_student and simulation_app.is_running():
                         "waypoints":    act["waypoints"],
                         "active":       act["active"],
                         "log_prob":     act["log_prob"],     # behaviour log_prob (PPO ratio denominator)
+                        "wp_rot3":      act.get("wp_rot3"),  # raw swing-twist sample (None if --no-rot)
                         "reward":       r_t,                 # per-step flatness improvement
                         "phi":          phi,
                         "shape":        comps["shape"],

@@ -131,12 +131,12 @@ def run(idx, train):
     order = idx[torch.randperm(len(idx))] if train else idx
     for i in range(0, len(order), args.batch):
         b = order[i:i + args.batch]
-        grasp_logits, wp_mean, stop_logits, wp_rot6d = model(X[b], GIDX[b])
+        grasp_logits, wp_mean, stop_logits, wp_rot = model(X[b], GIDX[b])
         gl = F.cross_entropy(grasp_logits, GIDX[b])
         m  = ACT[b].unsqueeze(-1)                                       # (B,max_wp,1) active mask
         dl = ((wp_mean - WP[b]) ** 2 * m).sum() / m.sum().clamp_min(1.0) / 3.0    # masked MSE per coord
         sl = F.binary_cross_entropy_with_logits(stop_logits, ACT[b])
-        rl = model.rotation_loss(wp_rot6d, WQ[b], ACT[b])              # masked geodesic (radians²)
+        rl = model.rotation_loss(wp_rot, WQ[b], ACT[b])               # masked geodesic (radians²)
         loss = args.grasp_weight * gl + args.drag_weight * dl + args.stop_weight * sl + args.rot_weight * rl
         vl = torch.zeros((), device=device)
         if use_value:                                                   # critic warm-start (masked MSE to return-to-go)

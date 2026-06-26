@@ -22,6 +22,10 @@ ap.add_argument("--out",    required=True)
 ap.add_argument("--model",  default=os.path.join(_ROOT, "checkpoints", "uv_mapper_best.pth"))
 ap.add_argument("--policy", default=os.path.join(_ROOT, "checkpoints", "student_vla.pth"))
 ap.add_argument("--greedy", action="store_true")
+ap.add_argument("--no-rot", action="store_true",
+                help="FREEZE wrist rotation: emit identity quats (pure-translation drag), no rotation "
+                     "in log_prob, no wp_rot3 logged. For the position-only sanity pass before rotation "
+                     "is trusted. Without it, rotation is a bounded swing-twist RL action.")
 ap.add_argument("--device", default=None)
 args = ap.parse_args()
 
@@ -62,12 +66,13 @@ state = {"pcd_xyz": pts, "uv_pred": uv_pred, "normals": normals, "centroid": cen
 x = torch.from_numpy(il_dataset.featurize(state)).unsqueeze(0).to(device)  # (1,N,9)
 
 with torch.no_grad():
-    r = policy.sample(x, greedy=args.greedy)
+    r = policy.sample(x, greedy=args.greedy, rot=not args.no_rot)
 grab_idx  = int(r["grab_idx"][0].item())
 waypoints = r["waypoints"][0].cpu().numpy().astype(np.float32)    # (max_wp,3)
 active    = r["active"][0].cpu().numpy().astype(np.float32)       # (max_wp,)
-wp_quat   = r["wp_quat"][0].cpu().numpy().astype(np.float32)      # (max_wp,4) deterministic wrist rot
+wp_quat   = r["wp_quat"][0].cpu().numpy().astype(np.float32)      # (max_wp,4) cone-clamped wrist rot
 log_prob  = float(r["log_prob"][0].item())
+wp_rot3   = None if r["wp_rot3"] is None else r["wp_rot3"][0].cpu().numpy().astype(np.float32)  # raw swing-twist sample
 
 release, path  = StudentVLA.traj_split(waypoints, active)         # contiguous active prefix
 k              = len(path) + 1                                    # active waypoints = path + release
@@ -83,10 +88,11 @@ out = {
     "grab_u":   grab_u, "grab_v": grab_v,
     "release":  release,
     "path":     path,
-    "path_quat":    path_quat,          # per-waypoint wrist orientation (deterministic, BC-learned)
+    "path_quat":    path_quat,          # per-waypoint wrist orientation (cone-clamped swing-twist)
     "release_quat": release_quat,
     "waypoints": waypoints.tolist(),    # raw sampled action — stored verbatim for log_prob recompute
     "active":    active.tolist(),
+    "wp_rot3":   None if wp_rot3 is None else wp_rot3.tolist(),  # raw swing-twist sample for PPO ratio (None if --no-rot)
     "log_prob": log_prob,
     "uv_pred_path": uv_pred_path,
 }

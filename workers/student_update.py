@@ -92,6 +92,11 @@ oldlp= np.array([float(e["log_prob"]) for e in entries], np.float32)       # (T,
 done = np.array([bool(e.get("done", False)) for e in entries])            # (T,)
 traj = [e.get("traj", e.get("episode", 0)) for e in entries]              # trajectory id per grab
 phi  = np.array([float(e.get("phi", 0.0)) for e in entries], np.float32)   # (T,) absolute potential Φ(s)
+# rotation action: present only when rollouts ran WITH rotation (not --no-rot). All-or-nothing across
+# the window — if any entry lacks it, train position only (rotation excluded from the PPO objective).
+has_rot = all(e.get("wp_rot3") is not None for e in entries)
+wr_t = (torch.tensor(np.array([e["wp_rot3"] for e in entries], np.float32), device=device)
+        if has_rot else None)                                              # (T,max_wp,3) or None
 
 x      = torch.tensor(xs,   dtype=torch.float32, device=device)
 g_t    = torch.tensor(gidx, dtype=torch.long,    device=device)
@@ -142,7 +147,8 @@ last = {}
 for _ in range(args.epochs):
     for s in range(0, T, args.minibatch):
         mb = slice(s, s + args.minibatch)
-        log_prob, entropy, value = policy.evaluate(x[mb], g_t[mb], wp_t[mb], ac_t[mb])
+        log_prob, entropy, value = policy.evaluate(
+            x[mb], g_t[mb], wp_t[mb], ac_t[mb], None if wr_t is None else wr_t[mb])
         ratio   = torch.exp(log_prob - oldlp_t[mb])
         unclip  = ratio * adv[mb]
         clipped = torch.clamp(ratio, 1 - args.clip, 1 + args.clip) * adv[mb]
