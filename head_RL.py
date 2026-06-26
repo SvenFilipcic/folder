@@ -66,7 +66,7 @@ parser.add_argument("--rl-student",   action="store_true", help="RL-train the St
 parser.add_argument("--student-buffer", type=str, default="student_buffer.json", help="(--rl-student) PPO rollout buffer (one entry per grab, tagged with its trajectory)")
 parser.add_argument("--student-policy", type=str, default=None, help="(--rl-student) StudentVLA checkpoint (default checkpoints/student_vla.pth)")
 parser.add_argument("--rl-group-k",     type=int, default=4, help="(--rl-student) independent SEQUENCES branched from each crumpled state (best-of-N diversity from one start; the critic is the baseline). Cost is K×turns sim per state")
-parser.add_argument("--rl-gamma",      type=float, default=0.97, help="(--rl-student) discount γ — horizon over which a grab gets credit for future flatness")
+parser.add_argument("--rl-gamma",      type=float, default=0.0, help="(--rl-student) discount γ. DEFAULT 0 = SINGLE-STEP: each grab is credited only by its own immediate ΔΦ (no cross-turn credit) — the right setting for smoothing (near-greedy) and the pre-IL curriculum. Set 0.97 for MULTI-STEP credit assignment once BC/IL is baked in")
 parser.add_argument("--rl-lambda",     type=float, default=0.95, help="(--rl-student) GAE λ — bias/variance trade-off of the advantage")
 parser.add_argument("--rl-clip",       type=float, default=0.2,  help="(--rl-student) PPO clip ε")
 parser.add_argument("--rl-epochs",     type=int,   default=4,    help="(--rl-student) PPO gradient epochs per update batch")
@@ -869,18 +869,23 @@ def _compute_reward():
 
 # ── flat-template reward (StudentVLA / --rl-student) ───────────────────────────────────────────
 # Goal: "get the garment as close to the canonical FLAT layout as possible." Built from the flat
-# template (FLAT_REF_PTS) + ground-truth per-vertex UV (PANEL_UV_ALL), pose-invariant so a perfect
-# flatten that lands shifted/rotated on the table is NOT punished for its table placement.
-FLAT_W_SHAPE = 1.0     # weight: 2D-aligned per-vertex XY distance to flat (shape + UV match)  (main)
-FLAT_W_FLAT  = 0.5     # weight: |mean(z) - table| — net lift off the table        (lie-flat term)
-FLAT_W_COV   = 0.5     # weight: top-down outline IoU vs the flat footprint        (silhouette term)
+# template (FLAT_REF_PTS) + ground-truth per-vertex UV (PANEL_UV_ALL). Translation-invariant (flatten
+# anywhere on the table) but ORIENTATION-AWARE: shape/iou are measured rotation-invariantly (pure
+# flatness), and a separate `orient` term penalises the garment's rotation off the reference pose.
+FLAT_W_SHAPE  = 1.0    # weight: 2D-aligned per-vertex XY distance to flat (shape + UV match)  (main)
+FLAT_W_FLAT   = 0.5    # weight: max(0, mean(z) - table) — net lift above flat       (lie-flat term)
+FLAT_W_COV    = 0.5    # weight: top-down outline IoU vs the flat footprint          (silhouette term)
+FLAT_W_ORIENT = 0.3    # weight: garment rotation (rad) off the reference pose       (orientation term)
 FLAT_GRID    = 96      # raster resolution for the outline-coverage IoU
 _TABLE_Z     = float(FLAT_REF_PTS[:, 2].mean())   # table height of the flat template
 
 
 def _align_xy(P, Q):
     """Best-fit rigid transform (rotation + translation) in the table plane mapping P→Q (Kabsch,
-    exact: P,Q share vertex correspondence). Z is left untouched. Returns aligned copy of P."""
+    exact: P,Q share vertex correspondence). Z is left untouched. Returns (aligned copy of P, angle),
+    where angle (rad, 0..π) is the ROTATION the fit had to apply = how mis-oriented P is from Q. The
+    aligned copy is orientation-INVARIANT (rotation removed), so shape/iou measure pure flatness; the
+    returned angle is the separate, tunable orientation signal."""
     Pxy, Qxy = P[:, :2], Q[:, :2]
     pc, qc   = Pxy.mean(0), Qxy.mean(0)
     H = (Pxy - pc).T @ (Qxy - qc)
@@ -889,7 +894,8 @@ def _align_xy(P, Q):
     R = Vt.T @ np.array([[1, 0], [0, d]], np.float64) @ U.T
     out = P.copy()
     out[:, :2] = (Pxy - pc) @ R.T + qc
-    return out
+    angle = float(abs(np.arctan2(R[1, 0], R[0, 0])))                  # rotation magnitude (rad)
+    return out, angle
 
 
 def _footprint_mask(xy, lo, cell, G):
@@ -938,22 +944,26 @@ def _flat_reward(verbose=True):
       shape : mean per-vertex 2D (XY) distance after rigid alignment to FLAT_REF_PTS. Each vertex
               carries its UV, so this is exactly 'every UV-fabric region sitting in its flat 2D
               place' = the base-flat-shape + UV-distribution match. (the core term)
-      height: |mean(z) - table| — the net lift off the table (difference in MEAN height, NOT a
-              per-vertex total-height penalty). Light flatness term.
+      height: max(0, mean(z) - table) — net lift ABOVE the flat reference (one-sided: only punished
+              when the garment sits higher than flat; being lower, which can't really happen on a
+              table, is never rewarded). Light flatness term.
       iou   : top-down outline IoU vs the flat footprint (overall 2D silhouette / no fold-under).
-    reward = -(W_SHAPE*shape + W_FLAT*height) + W_COV*iou."""
+      orient: |rotation| (rad) the Kabsch fit applied = how far the garment is turned from the
+              reference pose. Penalised so the smoothed garment ends in the canonical orientation.
+    reward = -(W_SHAPE*shape + W_FLAT*height + W_ORIENT*orient) + W_COV*iou."""
     p  = verts()
-    pa = _align_xy(p, FLAT_REF_PTS)
-    shape  = float(np.mean(np.linalg.norm(pa[:, :2] - FLAT_REF_PTS[:, :2], axis=1)))   # 2D shape / UV match
-    height = float(abs(p[:, 2].mean() - _TABLE_Z))                                     # net lift (mean diff)
+    pa, orient = _align_xy(p, FLAT_REF_PTS)                                            # orient = rad off reference pose
+    shape  = float(np.mean(np.linalg.norm(pa[:, :2] - FLAT_REF_PTS[:, :2], axis=1)))   # 2D shape / UV match (rot-invariant)
+    height = float(max(0.0, p[:, 2].mean() - _TABLE_Z))                                # net lift ABOVE flat (one-sided)
     cur    = _footprint_mask(pa[:, :2], _FLAT_LO, _FLAT_CELL, FLAT_GRID)
     inter  = np.logical_and(cur, _FLAT_MASK).sum()
     union  = np.logical_or(cur, _FLAT_MASK).sum()
     iou    = float(inter / union) if union else 0.0
-    reward = -(FLAT_W_SHAPE * shape + FLAT_W_FLAT * height) + FLAT_W_COV * iou
+    reward = -(FLAT_W_SHAPE * shape + FLAT_W_FLAT * height + FLAT_W_ORIENT * orient) + FLAT_W_COV * iou
     if verbose:
-        print(f"[flat] reward={reward:.4f}  shape={shape*100:.1f}cm  height={height*100:.1f}cm  iou={iou:.3f}")
-    return reward, {"shape": shape, "height": height, "iou": iou}
+        print(f"[flat] reward={reward:.4f}  shape={shape*100:.1f}cm  height={height*100:.1f}cm  "
+              f"orient={np.degrees(orient):.0f}deg  iou={iou:.3f}")
+    return reward, {"shape": shape, "height": height, "orient": orient, "iou": iou}
 
 
 def _render_flat_overlay(path, S=360):
@@ -980,7 +990,7 @@ def _render_flat_overlay(path, S=360):
                     if len(pts) > 1: d.line(pts + [pts[0]], fill=(255, 255, 255), width=1)
             except Exception: pass
         return img
-    pa = _align_xy(verts(), FLAT_REF_PTS)
+    pa, _ = _align_xy(verts(), FLAT_REF_PTS)
     canvas = Image.new("RGB", (2 * S + 12, S), (0, 0, 0))
     canvas.paste(_panel(FLAT_REF_PTS[:, :2], False), (0, 0))
     canvas.paste(_panel(pa[:, :2], True),            (S + 12, 0))
@@ -1490,6 +1500,7 @@ if args.rl_student and simulation_app.is_running():
                         "phi":          phi,
                         "shape":        comps["shape"],
                         "height":       comps["height"],
+                        "orient":       comps["orient"],
                         "iou":          comps["iou"],
                         "traj":         traj,                # GAE/returns are computed within a trajectory
                         "t":            t,
