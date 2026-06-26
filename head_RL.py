@@ -1466,6 +1466,15 @@ if args.rl_student and simulation_app.is_running():
                     if act is None:
                         break
 
+                    # diagnostic: two-panel UV overlay (predicted UV on the live cloud + flat template),
+                    # same render the Haiku path used → rl_uv_overlay.png in the repo root
+                    try:
+                        ovl = _render_uv_overlay(tmp_npz, act["uv_pred_path"],
+                                                 os.path.join(_ROOT, "rl_capture_latest.png"))
+                        print(f"[student] UV overlay → {ovl}")
+                    except Exception as e:
+                        print(f"[student] UV overlay skipped: {e}")
+
                     d        = np.load(tmp_npz)
                     pcd_xyz  = d["pcd_xyz"].astype(np.float32)
                     centroid = d["centroid"].astype(np.float32)
