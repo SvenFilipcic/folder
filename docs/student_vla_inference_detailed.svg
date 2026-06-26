@@ -1,0 +1,197 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1340 1820" font-family="'Segoe UI',Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#37474f"/></marker>
+    <marker id="ag" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#8e24aa"/></marker>
+    <style>
+      .tt  { font-size:24px; font-weight:700; fill:#102027; }
+      .sub { font-size:13px; fill:#546e7a; }
+      .h   { font-size:14px; font-weight:700; fill:#102027; }
+      .lbl { font-size:13px; font-weight:600; fill:#102027; }
+      .m   { font-family:'DejaVu Sans Mono',Consolas,monospace; font-size:12px; fill:#1a237e; }
+      .ms  { font-family:'DejaVu Sans Mono',Consolas,monospace; font-size:11px; fill:#37474f; }
+      .g   { font-size:11px; fill:#607d8b; }
+      .e   { stroke:#37474f; stroke-width:2; fill:none; marker-end:url(#a); }
+      .eg  { stroke:#8e24aa; stroke-width:2; fill:none; stroke-dasharray:5 3; marker-end:url(#ag); }
+      .shp { font-family:'DejaVu Sans Mono',Consolas,monospace; font-size:11px; fill:#00695c; font-weight:700; }
+    </style>
+  </defs>
+
+  <text x="40" y="42" class="tt">StudentVLA — inference data flow (layer level · no critic)</text>
+  <text x="40" y="66" class="sub">exactly what happens to one point cloud at test time: featurise → tokenise → 6× self-attention → grasp point + 4× query decoder → position / stop / wrist-rotation.</text>
+  <text x="40" y="84" class="sub">dimensions:  N = 4096 points · d = 384 · 8 attention heads (dₕ = 48) · MLP inner = 4·d = 1536 · K_max = 8 waypoint queries.</text>
+
+  <!-- ============ INPUT ============ -->
+  <rect x="470" y="104" width="400" height="66" rx="10" fill="#eceff1" stroke="#78909c" stroke-width="2"/>
+  <text x="490" y="128" class="lbl">x = featurize(state)</text>
+  <text x="490" y="148" class="m">[ x, y, z,  u, v,  nₓ, n_y, n_z,  z_abs ]</text>
+  <text x="490" y="163" class="g">per-point: position · UV · normal · abs height — source-agnostic</text>
+  <path class="e" d="M670,170 L670,196"/>
+  <text x="680" y="188" class="shp">(N, 9)</text>
+
+  <!-- ============ 1 · TOKENISE ============ -->
+  <rect x="330" y="198" width="680" height="150" rx="12" fill="#e8eaf6" stroke="#5c6bc0" stroke-width="2"/>
+  <text x="346" y="222" class="h">1 · Tokenise — lift each point to a d-dim token</text>
+  <rect x="350" y="236" width="280" height="48" rx="6" fill="#fff" stroke="#9fa8da"/>
+  <text x="362" y="256" class="m">embed:  Linear(9 → 384)</text>
+  <text x="362" y="272" class="ms">(N,9) → (N,384)</text>
+  <rect x="652" y="236" width="338" height="48" rx="6" fill="#fff" stroke="#9fa8da"/>
+  <text x="664" y="256" class="m">pos_mlp(xyz): Lin(3→384)→GELU→Lin(384→384)</text>
+  <text x="664" y="272" class="ms">(N,3) → (N,384)   geometry a pool would destroy</text>
+  <rect x="430" y="300" width="480" height="34" rx="6" fill="#c5cae9" stroke="#5c6bc0"/>
+  <text x="670" y="322" class="m" text-anchor="middle">h⁰ = embed(x) + pos_mlp(xyz)</text>
+  <path class="e" d="M670,348 L670,378"/>
+  <text x="680" y="368" class="shp">(N, 384)</text>
+
+  <!-- ============ 2 · ENCODER ============ -->
+  <rect x="290" y="380" width="760" height="372" rx="12" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+  <text x="306" y="404" class="h">2 · Encoder — 6 × pre-norm self-attention layer  (independent weights; one layer expanded)</text>
+
+  <rect x="306" y="420" width="96" height="56" rx="6" fill="#fff" stroke="#81c784"/>
+  <text x="354" y="445" class="m" text-anchor="middle">x</text>
+  <text x="354" y="462" class="ms" text-anchor="middle">(N,384)</text>
+  <path class="e" d="M402,448 L432,448"/>
+
+  <rect x="432" y="414" width="276" height="68" rx="6" fill="#fff" stroke="#81c784"/>
+  <text x="444" y="433" class="m">LayerNorm → Multi-Head Self-Attn (8h)</text>
+  <text x="444" y="450" class="m">⊕ residual</text>
+  <text x="444" y="470" class="g">every point attends to every other point</text>
+  <path class="e" d="M708,448 L740,448"/>
+
+  <rect x="740" y="414" width="294" height="68" rx="6" fill="#fff" stroke="#81c784"/>
+  <text x="752" y="433" class="m">LayerNorm → Linear 384→1536</text>
+  <text x="752" y="450" class="m">→ GELU → Linear 1536→384  ⊕ residual</text>
+  <text x="752" y="470" class="g">position-wise feed-forward (per token)</text>
+
+  <text x="306" y="506" class="lbl">↻ stack ×6  ·  output keeps shape (N, 384)</text>
+
+  <!-- MHSA detail -->
+  <rect x="332" y="520" width="690" height="210" rx="8" fill="#f1f8e9" stroke="#aed581"/>
+  <text x="348" y="542" class="lbl">inside Multi-Head Self-Attention  (the core step)</text>
+  <text x="348" y="566" class="m">Q, K, V  =  x·W_Q,  x·W_K,  x·W_V          (each Linear 384 → 384)</text>
+  <text x="348" y="590" class="m">split into 8 heads          →  Q, K, V : (8, N, 48)</text>
+  <text x="348" y="614" class="m">A  =  softmax( Q·Kᵀ / √48 )  →  (8, N, N)   attention weights, one N×N map per head</text>
+  <text x="348" y="638" class="m">Z  =  A·V                   →  (8, N, 48)  → concat heads → (N, 384)</text>
+  <text x="348" y="662" class="m">out =  Z·W_O                   (Linear 384 → 384)</text>
+  <text x="348" y="690" class="g">softmax is row-wise: each point's attention over all points sums to 1. √48 keeps the dot-products from saturating softmax.</text>
+  <text x="348" y="710" class="g">pre-norm = LayerNorm is applied BEFORE attention/MLP, then the block's output is added back (residual) — stabler to train deep.</text>
+
+  <path class="e" d="M670,752 L670,782"/>
+  <text x="680" y="772" class="shp">(N, 384)</text>
+
+  <!-- ============ H ============ -->
+  <rect x="430" y="784" width="480" height="46" rx="8" fill="#c8e6c9" stroke="#2e7d32"/>
+  <text x="670" y="803" class="lbl" text-anchor="middle">H  =  (N, 384)</text>
+  <text x="670" y="821" class="g" text-anchor="middle">one context-rich feature per point · nothing pooled away</text>
+
+  <!-- split to grasp (left) and queries (right) -->
+  <path class="e" d="M540,830 L300,830 L300,872"/>
+  <path class="e" d="M800,830 L1030,830 L1030,872"/>
+
+  <!-- ============ 3a · GRASP HEAD ============ -->
+  <rect x="60" y="874" width="470" height="186" rx="12" fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
+  <text x="76" y="898" class="h">3a · Grasp head — pick ONE point</text>
+  <rect x="76" y="910" width="438" height="30" rx="5" fill="#fff" stroke="#ffb74d"/>
+  <text x="86" y="930" class="m">logits = H·W_grasp        Linear(384 → 1) → (N,)</text>
+  <rect x="76" y="946" width="438" height="30" rx="5" fill="#fff" stroke="#ffb74d"/>
+  <text x="86" y="966" class="m">p = softmax(logits)       Categorical over the N points</text>
+  <rect x="76" y="982" width="438" height="30" rx="5" fill="#fff" stroke="#ffb74d"/>
+  <text x="86" y="1002" class="m">grab_idx = argmax p   (greedy)  →  one point index</text>
+  <text x="76" y="1032" class="g">a dense per-point read-out — multimodal &amp; frame-free (no grid round-trip).</text>
+  <text x="76" y="1050" class="ms" fill="#8e24aa">grab_feat = H[grab_idx]   (384,)   conditions the drag ↓</text>
+
+  <!-- conditioning arrow into queries -->
+  <path class="eg" d="M530,1000 L760,1000 L760,962"/>
+
+  <!-- ============ 3b · DRAG QUERIES ============ -->
+  <rect x="560" y="874" width="470" height="120" rx="12" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+  <text x="576" y="898" class="h">3b · Drag queries — 8 learned slots</text>
+  <rect x="576" y="910" width="438" height="30" rx="5" fill="#fff" stroke="#64b5f6"/>
+  <text x="586" y="930" class="m">wp_queries : Parameter (8, 384)</text>
+  <rect x="576" y="946" width="438" height="30" rx="5" fill="#fff" stroke="#64b5f6"/>
+  <text x="586" y="966" class="m">tgt = wp_queries + grab_feat   → (8, 384)</text>
+  <text x="576" y="990" class="g" fill="#8e24aa">the grabbed point is added to every query (conditioning)</text>
+
+  <path class="e" d="M795,994 L795,1040"/>
+  <text x="805" y="1024" class="shp">(8, 384)</text>
+
+  <!-- ============ 4 · DECODER ============ -->
+  <rect x="290" y="1042" width="760" height="372" rx="12" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+  <text x="306" y="1066" class="h">4 · Decoder — 4 × pre-norm layer (one expanded). 8 queries decode in parallel, cross-attending the N points</text>
+
+  <rect x="306" y="1082" width="96" height="56" rx="6" fill="#fff" stroke="#64b5f6"/>
+  <text x="354" y="1107" class="m" text-anchor="middle">tgt</text>
+  <text x="354" y="1124" class="ms" text-anchor="middle">(8,384)</text>
+  <path class="e" d="M402,1110 L424,1110"/>
+
+  <rect x="424" y="1078" width="180" height="64" rx="6" fill="#fff" stroke="#64b5f6"/>
+  <text x="434" y="1097" class="m">LayerNorm →</text>
+  <text x="434" y="1113" class="m">self-attn (8↔8)</text>
+  <text x="434" y="1131" class="g">queries coordinate</text>
+  <path class="e" d="M604,1110 L626,1110"/>
+
+  <rect x="626" y="1078" width="190" height="64" rx="6" fill="#fff" stroke="#64b5f6"/>
+  <text x="636" y="1097" class="m">LayerNorm →</text>
+  <text x="636" y="1113" class="m">cross-attn → H</text>
+  <text x="636" y="1131" class="g">read the cloud</text>
+  <path class="e" d="M816,1110 L838,1110"/>
+
+  <rect x="838" y="1078" width="196" height="64" rx="6" fill="#fff" stroke="#64b5f6"/>
+  <text x="848" y="1097" class="m">LN → 384→1536</text>
+  <text x="848" y="1113" class="m">→GELU→1536→384</text>
+  <text x="848" y="1131" class="g">⊕ residual (each ⊕)</text>
+
+  <text x="306" y="1166" class="lbl">↻ stack ×4  ·  output (8, 384)</text>
+
+  <!-- cross-attn detail -->
+  <rect x="332" y="1180" width="690" height="186" rx="8" fill="#e1f5fe" stroke="#81d4fa"/>
+  <text x="348" y="1202" class="lbl">inside Cross-Attention  (where each query reads the geometry)</text>
+  <text x="348" y="1226" class="m">Q = tgt·W_Q   (8, 384)        K, V = H·W_K, H·W_V   (N, 384)</text>
+  <text x="348" y="1250" class="m">split 8 heads → Q:(8,8,48)  K,V:(8,N,48)</text>
+  <text x="348" y="1274" class="m">A = softmax( Q·Kᵀ / √48 )  →  (8 heads, 8 queries, N points)</text>
+  <text x="348" y="1298" class="m">Z = A·V  →  concat → (8, 384)   →   out = Z·W_O</text>
+  <text x="348" y="1326" class="g">each of the 8 queries forms its own weighted average over all N points — that's how a waypoint "looks at" the relevant part of the fold.</text>
+  <text x="348" y="1346" class="g">self-attn (8×8) lets the waypoints stay ordered &amp; non-overlapping; cross-attn (8×N) injects the cloth geometry.</text>
+
+  <path class="e" d="M670,1414 L670,1444"/>
+  <text x="680" y="1434" class="shp">dec  (8, 384)</text>
+
+  <!-- ============ 5 · HEADS ============ -->
+  <text x="306" y="1466" class="h">5 · Output heads — three Linear read-outs per query (from dec)</text>
+
+  <rect x="306" y="1478" width="232" height="120" rx="10" fill="#fff" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="320" y="1500" class="lbl">position</text>
+  <text x="320" y="1522" class="m">Linear(384 → 3)</text>
+  <text x="320" y="1542" class="m">→ wp_mean (8, 3)</text>
+  <text x="320" y="1566" class="g">XY rel-centroid,</text>
+  <text x="320" y="1582" class="g">Z absolute (table=0)</text>
+
+  <rect x="554" y="1478" width="232" height="120" rx="10" fill="#fff" stroke="#e53935" stroke-width="1.5"/>
+  <text x="568" y="1500" class="lbl">length / stop</text>
+  <text x="568" y="1522" class="m">Linear(384 → 1)</text>
+  <text x="568" y="1542" class="m">→ stop (8,)</text>
+  <text x="568" y="1566" class="g">σ(stop) &gt; 0.5 → the</text>
+  <text x="568" y="1582" class="g">contiguous active k</text>
+
+  <rect x="802" y="1478" width="232" height="120" rx="10" fill="#fff" stroke="#43a047" stroke-width="1.5"/>
+  <text x="816" y="1500" class="lbl">wrist rotation</text>
+  <text x="816" y="1522" class="m">Linear(384 → 6)</text>
+  <text x="816" y="1540" class="m">Gram-Schmidt → R</text>
+  <text x="816" y="1558" class="m">→ quat (8, 4)</text>
+  <text x="816" y="1582" class="g">[x,y,z,w] per waypoint</text>
+
+  <path class="e" d="M422,1598 L422,1628"/>
+  <path class="e" d="M670,1598 L670,1628"/>
+  <path class="e" d="M918,1598 L918,1628"/>
+
+  <!-- ============ 6 · ACTION ============ -->
+  <rect x="290" y="1630" width="760" height="150" rx="12" fill="#ede7f6" stroke="#5e35b1" stroke-width="2"/>
+  <text x="306" y="1654" class="h">6 · Action  →  head_RL execution</text>
+  <rect x="306" y="1666" width="728" height="30" rx="5" fill="#fff" stroke="#b39ddb"/>
+  <text x="316" y="1686" class="m">grasp  : point = pcd[grab_idx] xyz   ·   grab orientation from its surface normal (not a head)</text>
+  <rect x="306" y="1702" width="728" height="30" rx="5" fill="#fff" stroke="#b39ddb"/>
+  <text x="316" y="1722" class="m">path   : waypoints[:k] = path… + release ,  each = (x, y, z) + wrist quaternion</text>
+  <text x="306" y="1752" class="g">k = the active prefix → variable-length, no fixed PATH_LEN. rotation is deterministic (taken straight from the head, never sampled).</text>
+  <text x="306" y="1770" class="g">execution rotates the pinned patch about a wrist pivot 5 cm above it along the patch normal, SLERP-interpolating the waypoint quaternions.</text>
+</svg>

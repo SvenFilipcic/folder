@@ -1,13 +1,17 @@
 """
-vlm_action.py — VLA: overhead UV-overlay image → 2-arm grab+drag actions via Claude Haiku.
+vlm_action.py — VLA: overhead UV-overlay image → ONE-arm grab+drag action via Claude Haiku.
 
 Called by head_RL.py in VLA mode:
     python vlm_action.py --image rl_uv_overlay.png --out /tmp/vlm_action.json
 
 head_RL.py renders an overhead view of the garment where every point is coloured by its
-predicted UV (R=u, G=v) and a sparse set of points is labelled with the literal (u,v).
-Haiku reads that image and picks, per arm, a grab in UV space + a world-space drag.
-head_RL.py then snaps each grab UV to the nearest real mesh point.
+predicted UV (R=u, G=v). Haiku reads that image and picks (single arm for now):
+  grab    (u,v)        — WHICH bit of fabric to grab, in UV space (frame-free, source-agnostic)
+  release (x,y,z)      — WHERE to drag it to and let go
+  path    [(x,y,z)*5]  — 5 waypoints the hand passes through between grab and release
+xyz FRAME: origin = garment centre on the table, +x right, +y away from camera, +z up, metres.
+(So x,y are relative to the cloud centroid; z is absolute height above the table.)
+head_RL.py snaps the grab UV to the nearest real mesh point and converts xyz to world.
 """
 import os, sys, json, re, argparse, subprocess
 
@@ -23,36 +27,50 @@ if not os.path.exists(img_path):
 
 PROMPT = f"""Read the image file at {img_path}
 
-The image has TWO panels of the SAME garment, which two robot arms must flatten on a table.
+A SINGLE robot arm must flatten the garment on a table. The image is the real overhead camera view
+of the crumpled garment, plus a SMALL reference window on the right.
 
-LEFT panel — the real overhead camera view of the crumpled garment. Every point on the fabric is
-drawn as a small dot. Raised, bunched, folded fabric (you can see it from the shading/structure)
-is what needs to be grabbed and spread out.
+MAIN image (most of the picture) — the overhead camera. Every point on the fabric is a small dot
+coloured by its predicted UV. Raised, bunched, folded fabric (you can see it from the shading and
+structure) is what needs to be grabbed and spread out. A WHITE OUTLINE is drawn on the FLOOR behind
+the garment: that is the TARGET — the exact shape AND orientation the garment must end up in when
+flattened (body + sleeves in a fixed pose). Drag fabric so the garment fills this white outline:
+fabric sticking out past the outline, or area inside the outline left empty, must be fixed. The
+outline does NOT move or rotate — turn and spread the garment to match it.
 
-RIGHT panel — the garment's TRUE flat layout ("UV space"): a fixed reference template showing the
-garment laid out perfectly flat (you will see its real shape — body and sleeves). The horizontal
-axis is u (0..1, left→right), the vertical axis is v (0..1, bottom→top).
+SMALL reference window (top right, "flat UV / colour key") — the garment laid out perfectly flat,
+coloured by UV. Horizontal axis = u (0..1, left→right), vertical axis = v (0..1, bottom→top). Use it
+only as a colour key: a dot's colour on the MAIN image tells you which part of the flat garment that
+fabric is, so you know where inside the white outline it belongs.
 
 UV colour code (BOTH panels): each dot's colour encodes its UV coordinate — Red channel = u,
 Green channel = v. On the RIGHT this colour matches position (it IS the flat layout). On the LEFT,
 each crumpled point is painted with its predicted UV colour. So find a coloured region on the LEFT,
 read its colour, and the same colour on the RIGHT template tells you where that fabric belongs when
-flat. Use this to choose which crumpled region to grab and which direction to drag it.
+flat. Use this to choose which crumpled region to grab and where to drag it.
 
-Task: pick ONE grab point per arm, specified by the UV coordinate (grab_u, grab_v) you want to
-grab, plus a drag vector. Prefer grabbing raised/bunched regions (LEFT) and dragging them outward
-toward where their (u, v) says they belong (RIGHT). The two grabs are enforced >=5 cm apart in 3D.
+WORLD FRAME for all x,y,z below (metres): origin = the garment's centre on the table; +x = right,
++y = away from the camera, +z = up. The table surface is z = 0. The garment spans roughly
+x,y in -0.3..0.3.
 
-Drag vector (world metres, LEFT panel axes — right = +x, away from camera = +y):
-  dx: -0.5..0.5 (right+)
-  dy: -0.5..0.5 (away+)
-  dz:  0.05..0.40 lift height during the drag (use 0.15-0.25)
+Task — pick ONE grab + drag:
+  1. grab_u, grab_v : the UV (colour) of a RAISED / BUNCHED region on the LEFT you want to pick up.
+  2. release [x,y,z]: where to carry that fabric and let go — the spot inside the WHITE target
+     outline where its (u,v) belongs (use the RIGHT panel colour key), laid down flat
+     (z ~= 0.0-0.03, i.e. on the table).
+  3. path [5 points]: 5 waypoints [x,y,z] the hand moves through between grab and release. Lift the
+     fabric up first (z ~= 0.15-0.30) so it clears the table, carry it across, then come down to the
+     release. The 5 points should go from near the grab, up and over, down to near the release.
+
+Bounds: x,y in -0.5..0.5 ; z in 0.0..0.40.
 
 Respond with ONLY valid JSON, no markdown. Use plain numbers — NO leading '+' sign
 (write 0.15, not +0.15) and no units:
 {{
-  "arm1": {{"grab_u": 0.XX, "grab_v": 0.XX, "dx": 0.XX, "dy": 0.XX, "dz": 0.XX, "reasoning": "one sentence"}},
-  "arm2": {{"grab_u": 0.XX, "grab_v": 0.XX, "dx": 0.XX, "dy": 0.XX, "dz": 0.XX, "reasoning": "one sentence"}}
+  "grab_u": 0.XX, "grab_v": 0.XX,
+  "release": [0.XX, 0.XX, 0.XX],
+  "path": [[0.XX,0.XX,0.XX],[0.XX,0.XX,0.XX],[0.XX,0.XX,0.XX],[0.XX,0.XX,0.XX],[0.XX,0.XX,0.XX]],
+  "reasoning": "one sentence"
 }}"""
 
 result = subprocess.run(
@@ -80,32 +98,53 @@ raw = raw.strip()
 # that follows a delimiter, so '+' inside reasoning strings is left alone
 raw = re.sub(r'([:\[,]\s*)\+(\d)', r'\1\2', raw)
 
+PATH_LEN = 5
+_clampxy  = lambda c: float(max(-0.5, min(0.5, c)))
+_clampz   = lambda c: float(max(0.0,  min(0.40, c)))
+
+
+def _xyz(p):
+    return [_clampxy(p[0]), _clampxy(p[1]), _clampz(p[2])]
+
+
+def _fix_path(path, release):
+    """Coerce to exactly PATH_LEN clamped [x,y,z] waypoints (pad with release / truncate)."""
+    pts = [_xyz(p) for p in (path or []) if isinstance(p, (list, tuple)) and len(p) >= 3]
+    pts = pts[:PATH_LEN]
+    while len(pts) < PATH_LEN:
+        pts.append(list(release))
+    return pts
+
+
 try:
     data = json.loads(raw)
 
-    def _parse_arm(d):
-        return {
-            "grab_u": float(max(0.0, min(1.0, d["grab_u"]))),
-            "grab_v": float(max(0.0, min(1.0, d["grab_v"]))),
-            "dx":     float(max(-0.5, min(0.5, d["dx"]))),
-            "dy":     float(max(-0.5, min(0.5, d["dy"]))),
-            "dz":     float(max(0.05, min(0.40, d["dz"]))),
-            "reasoning": str(d.get("reasoning", "")),
-        }
+    grab_u  = float(max(0.0, min(1.0, data["grab_u"])))
+    grab_v  = float(max(0.0, min(1.0, data["grab_v"])))
+    release = _xyz(data["release"])
+    path    = _fix_path(data.get("path"), release)
+    result_data = {"arm1": {
+        "grab_u": grab_u, "grab_v": grab_v,
+        "release": release, "path": path,
+        "reasoning": str(data.get("reasoning", "")),
+    }}
 
-    result_data = {"arm1": _parse_arm(data["arm1"]), "arm2": _parse_arm(data["arm2"])}
-
-except (json.JSONDecodeError, KeyError, ValueError) as e:
+except (json.JSONDecodeError, KeyError, ValueError, TypeError, IndexError) as e:
     print(f"[vlm_action] WARNING: parse failed ({e}): {raw!r}")
-    result_data = {
-        "arm1": {"grab_u": 0.25, "grab_v": 0.25, "dx":  0.15, "dy":  0.10, "dz": 0.20, "reasoning": "fallback"},
-        "arm2": {"grab_u": 0.75, "grab_v": 0.75, "dx": -0.15, "dy": -0.10, "dz": 0.20, "reasoning": "fallback"},
-    }
+    rel = [0.20, 0.10, 0.02]
+    result_data = {"arm1": {
+        "grab_u": 0.5, "grab_v": 0.5,
+        "release": rel,
+        "path": [[0.0, 0.0, 0.20], [0.10, 0.05, 0.25],
+                 [0.15, 0.08, 0.20], [0.18, 0.09, 0.10], list(rel)],
+        "reasoning": "fallback",
+    }}
 
 with open(args.out, "w") as fh:
     json.dump(result_data, fh, indent=2)
 
-for arm in ("arm1", "arm2"):
-    a = result_data[arm]
+for arm, a in result_data.items():
+    r = a["release"]
     print(f"[vlm_action] {arm} grab_uv=({a['grab_u']:.2f},{a['grab_v']:.2f})"
-          f"  drag=({a['dx']:.2f},{a['dy']:.2f},{a['dz']:.2f})  → {a['reasoning']}")
+          f"  release=({r[0]:.2f},{r[1]:.2f},{r[2]:.2f})  +{len(a['path'])} waypoints"
+          f"  → {a['reasoning']}")

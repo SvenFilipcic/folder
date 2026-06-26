@@ -21,12 +21,24 @@ parser.add_argument("--ball",         action="store_true")
 parser.add_argument("--ball-radius",  type=float, default=0.08)
 parser.add_argument("--ball-lift",    type=float, default=0.35)
 parser.add_argument("--ball-offset",  type=float, default=0.0)
-parser.add_argument("--drape-frames", type=int,   default=60)
-parser.add_argument("--settle",       type=int,   default=100)
+parser.add_argument("--drape-frames", type=int,   default=40)
+parser.add_argument("--settle",       type=int,   default=90)
 parser.add_argument("--substeps",     type=int,   default=10)
 parser.add_argument("--iters",        type=int,   default=4)
-parser.add_argument("--mass",         type=float, default=0.2)
-parser.add_argument("--prad",         type=float, default=9e-3)
+# ── garment material (calibrated Style3D real-fabric scale — ported from data_gen.py) ────────
+parser.add_argument("--mass",     type=float, default=0.6,  help="TOTAL garment mass (kg) → density = mass/panel_area")
+parser.add_argument("--density",  type=float, default=None, help="override fabric mass per area (kg/m^2); else from --mass")
+parser.add_argument("--stretch-weft",  type=float, default=1.0e2, help="tri_aniso_ke weft (Style3D real-fabric scale)")
+parser.add_argument("--stretch-warp",  type=float, default=1.0e2, help="tri_aniso_ke warp")
+parser.add_argument("--stretch-shear", type=float, default=1.0e1, help="tri_aniso_ke shear (soft → natural drape)")
+parser.add_argument("--damping",  type=float, default=None, help="tri_kd override (default: builder's 10.0)")
+parser.add_argument("--bend-weft",  type=float, default=0.5e-5, help="edge_aniso_ke weft (Style3D units; LOW = fabric)")
+parser.add_argument("--bend-warp",  type=float, default=0.5e-5, help="edge_aniso_ke warp")
+parser.add_argument("--bend-shear", type=float, default=0.6e-6, help="edge_aniso_ke shear")
+parser.add_argument("--bend-spec",  action="store_true", help="force literal spec bend 8000 into edge_aniso_ke (WARNING: rigid)")
+parser.add_argument("--prad",       type=float, default=5.0e-3, help="particle radius (m) — body/ground contact only (NOT self-contact)")
+parser.add_argument("--self-thick", type=float, default=0.7e-2, help="cloth self-contact radius (m); folded layers rest ~2x apart")
+parser.add_argument("--self-stiff", type=float, default=0.8,    help="self-contact layer-separation spring stiffness multiplier")
 parser.add_argument("--config",       type=str,   default=None)
 parser.add_argument("--model",        type=str,   default=None)
 parser.add_argument("--infer-env",    type=str,   default="infer")
@@ -34,9 +46,15 @@ parser.add_argument("--no-capture",   dest="capture", action="store_false")
 parser.add_argument("--normal-k",     type=int,   default=30)
 parser.add_argument("--gui",          action="store_true", help="open Isaac Sim window (default: headless)")
 # ── grab-drape-drop crumple (default) ────────────────────────────────────────
-parser.add_argument("--grab-reach",      type=float, default=0.20, help="max grab offset from centroid (m)")
-parser.add_argument("--grab-radius-min", type=float, default=0.03, help="min grab patch radius (m)")
-parser.add_argument("--grab-radius-max", type=float, default=0.05, help="max grab patch radius (m)")
+parser.add_argument("--grab-reach",      type=float, default=0.35, help="max grab offset from centroid (m)")
+parser.add_argument("--arm-box-half",    type=float, default=0.6,  help="half-width (m) of the FIXED world workspace box the arm may not leave: world XY clamped to [center ± this]. Anchored at --arm-box-cx/cy (the cloth spawn), it does NOT follow the cloth")
+parser.add_argument("--arm-box-cx",      type=float, default=0.0,  help="world X centre of the workspace box (cloth spawn X)")
+parser.add_argument("--arm-box-cy",      type=float, default=0.0,  help="world Y centre of the workspace box (cloth spawn Y)")
+parser.add_argument("--arm-box-zmax",    type=float, default=0.5,  help="max height (m) above the table a waypoint may reach")
+parser.add_argument("--recovery-step",   type=float, default=0.3,  help="when the policy's grab falls OUTSIDE the workspace box, the fallback grabs the nearest in-box cloth point and drags it this far (m) toward the box centre to pull the garment back into reach")
+parser.add_argument("--grab-radius-min", type=float, default=0.01, help="min grab patch radius (m)")
+parser.add_argument("--grab-radius-max", type=float, default=0.03, help="max grab patch radius (m)")
+parser.add_argument("--grab-radius",     type=float, default=0.008, help="grasp PINCH radius (m): cloth verts within this of the grab point get pinned. ~0.008 ≈ robot fingertip pinch (~15 verts); 0.03 = broad hand grab (~200). Applies to manual + RL/VLA execution")
 parser.add_argument("--grab-height",     type=float, default=0.50, help="hang height during drape (m)")
 # ── RL training mode ──────────────────────────────────────────────────────────
 parser.add_argument("--rl",           action="store_true", help="run RL training loop")
@@ -44,11 +62,31 @@ parser.add_argument("--rl-turns",     type=int,   default=4,  help="grasp turns 
 parser.add_argument("--rl-k",         type=int,   default=6,  help="episodes between policy updates")
 parser.add_argument("--rl-buffer",    type=str,   default="rl_buffer.json")
 parser.add_argument("--rl-policy",    type=str,   default=None, help="RL policy checkpoint path")
+parser.add_argument("--rl-student",   action="store_true", help="RL-train the StudentVLA trajectory policy via MULTI-STEP PPO+GAE: run whole smoothing SEQUENCES, reward each grab by its flatness improvement, and credit it with the discounted future (so a setup move that looks bad now is rewarded for what it unlocks). BC-init it first with workers/train_student.py")
+parser.add_argument("--student-buffer", type=str, default="student_buffer.json", help="(--rl-student) PPO rollout buffer (one entry per grab, tagged with its trajectory)")
+parser.add_argument("--student-policy", type=str, default=None, help="(--rl-student) StudentVLA checkpoint (default checkpoints/student_vla.pth)")
+parser.add_argument("--rl-group-k",     type=int, default=4, help="(--rl-student) independent SEQUENCES branched from each crumpled state (best-of-N diversity from one start; the critic is the baseline). Cost is K×turns sim per state")
+parser.add_argument("--rl-gamma",      type=float, default=0.97, help="(--rl-student) discount γ — horizon over which a grab gets credit for future flatness")
+parser.add_argument("--rl-lambda",     type=float, default=0.95, help="(--rl-student) GAE λ — bias/variance trade-off of the advantage")
+parser.add_argument("--rl-clip",       type=float, default=0.2,  help="(--rl-student) PPO clip ε")
+parser.add_argument("--rl-epochs",     type=int,   default=4,    help="(--rl-student) PPO gradient epochs per update batch")
+parser.add_argument("--rl-ent-weight", type=float, default=1e-3, help="(--rl-student) entropy bonus weight (exploration)")
+parser.add_argument("--rl-vf-weight",  type=float, default=0.5,  help="(--rl-student) critic (value) loss weight")
+parser.add_argument("--rl-det-critic", action="store_true", help="(--rl-student) use the EXACT potential-based critic V(s)=phi_target-Φ(s) from the stored 'phi' instead of the learned value head (which is random with no IL value-pretraining). Use for the from-scratch RL sanity run; switch off once you've BC/value-pretrained on demos")
+parser.add_argument("--student-eval",   action="store_true", help="EVAL the StudentVLA: load the checkpoint, run GREEDY (deterministic) actions and watch — no sampling, no learning, no logging. Add --gui to see it live in Isaac; saves rl_flat_overlay.png each step")
 parser.add_argument("--rl-settle",    type=int,   default=80,  help="settle frames after each drag")
-parser.add_argument("--rl-drag-fr",   type=int,   default=60,  help="frames to execute drag motion")
+parser.add_argument("--rl-drag-fr",   type=int,   default=60,  help="(RL mode) fixed frames to execute drag motion")
+parser.add_argument("--drag-speed",   type=float, default=0.12, help="(VLA / --scripted) drag speed in m/s; frames derived from path length so speed is constant (slow → cloth doesn't tear)")
 parser.add_argument("--vlm-actions",  action="store_true", help="(deprecated no-op) VLA is the default mode now")
 parser.add_argument("--il-dir",       type=str, default=None, help="IL dataset dir (default <root>/il_dataset); VLA mode logs (state,action) here")
 parser.add_argument("--no-il",        dest="il", action="store_false", help="disable IL data logging in VLA mode")
+parser.add_argument("--manual",       action="store_true", help="interactive: click+drag the garment with the mouse (overhead view); scroll = raise/lower grab Z, r = re-crumple, q = quit")
+parser.add_argument("--manual-z-step", type=float, default=0.02, help="(--manual) metres Z changes per mouse-wheel notch")
+parser.add_argument("--scripted",     action="store_true", help="deterministic UV teacher: replay grasp_regions.json in priority order (grab UV patch → drag to its flat target), logging IL samples (source=scripted). No VLM, no learning. Add --gui to watch.")
+parser.add_argument("--regions",      type=str, default=None, help="(--scripted) region config (default reference/grasp_regions.json from data/label_grasp_regions.py)")
+parser.add_argument("--teacher-tol",     type=float, default=0.05, help="(--scripted) region 'done' tolerance (m): once the patch sits within this of its flat target, advance to the next region")
+parser.add_argument("--teacher-retries", type=int,   default=2,    help="(--scripted) max grab attempts per region before moving on")
+parser.add_argument("--teacher-lift",    type=float, default=0.22, help="(--scripted) apex height (m) of the lift-carry-place arc")
 parser.set_defaults(il=True)
 args = parser.parse_args()
 
@@ -132,7 +170,9 @@ uv_scale = float(np.sqrt(area3d/areaUV)) if areaUV > 0 else 1.0
 panel = (uvs * uv_scale).astype(np.float32)
 F = tri3d.reshape(-1).astype(np.int32)
 panel_area = float(area3d)
-DENSITY = args.mass / panel_area if panel_area > 0 else 0.3
+DENSITY = args.density if args.density is not None else (args.mass / panel_area if panel_area > 0 else 0.3)
+if args.bend_spec:                               # user insists on the literal spec value
+    args.bend_weft = args.bend_warp = args.bend_shear = 8.0e3
 
 _g = np.load(os.path.join(_ROOT, "reference", "majca_mesh_graph.npz"))
 PANEL_ID_ALL   = _g["node_panel"].astype(np.int32)
@@ -150,8 +190,9 @@ style3d.add_cloth_mesh(
     vertices=V.tolist(), indices=F.tolist(),
     panel_verts=panel.tolist(), panel_indices=uv_indices.reshape(-1).tolist(),
     density=DENSITY, scale=1.0, particle_radius=args.prad,
-    tri_aniso_ke=wp.vec3(2e1, 2e1, 2e0),
-    edge_aniso_ke=wp.vec3(2e-5, 2e-5, 5e-6),
+    tri_aniso_ke=wp.vec3(args.stretch_weft, args.stretch_warp, args.stretch_shear),
+    edge_aniso_ke=wp.vec3(args.bend_weft, args.bend_warp, args.bend_shear),
+    **({"tri_kd": args.damping} if args.damping is not None else {}),  # else builder default 10.0
 )
 builder.add_ground_plane()
 if args.ball:
@@ -161,11 +202,24 @@ if args.ball:
     builder.add_shape_sphere(bbody, radius=args.ball_radius, cfg=bcfg)
 
 model = builder.finalize()
-model.soft_contact_radius = 0.35e-2; model.soft_contact_margin = 0.45e-2
-model.soft_contact_ke = 5; model.soft_contact_kd = 1e-3; model.soft_contact_mu = 1
+model.soft_contact_ke = 1.0e1; model.soft_contact_kd = 1.0e-6; model.soft_contact_mu = 0.8
 model.set_gravity((0,0,-9.81))
 solver = newton.solvers.SolverStyle3D(model=model, iterations=args.iters)
 solver._precompute(builder)
+
+# Style3D self-contact thickness lives on the solver's Collision handler (hard-coded 3mm radius →
+# 6mm gap, too thin: front/back layers bleed in the overhead capture). Bump the radius + scale the
+# layer-separation springs so folded layers rest ~2*self_thick apart. (calibrated in data_gen.py)
+if getattr(solver, "collision", None) is not None:
+    solver.collision.radius    = float(args.self_thick)
+    solver.collision.stiff_vf *= args.self_stiff   # vertex-face layer-separation spring
+    solver.collision.stiff_ee *= args.self_stiff   # edge-edge
+    solver.collision.stiff_ef *= args.self_stiff   # edge-face (untangling)
+    solver.collision.rebuild_bvh(model.particle_q)
+    print(f"[demo] self-contact radius {args.self_thick*1e3:.0f}mm "
+          f"(layer gap ~{2*args.self_thick*1e3:.0f}mm) stiff x{args.self_stiff:g}")
+else:
+    print("[demo] WARNING: solver.collision is None — self-contact disabled, UV bleeding likely")
 s0, s1 = model.state(), model.state()
 _q0  = s0.particle_q.numpy().copy()
 _qd0 = s0.particle_qd.numpy().copy()
@@ -267,7 +321,23 @@ def _reset_cloth():
         xb.ClearXformOpOrder(); xb.AddTranslateOp().Set(Gf.Vec3d(*bc.tolist()))
 
 
-GRAB_RADIUS = 0.03   # cloth verts within this radius of the grab anchor get pinned (m)
+def _snapshot_cloth():
+    """Capture full cloth state so we can replay K different actions from the SAME crumple
+    (per-state RLOO baseline). Returns particle q/qd for both solver states + active flags."""
+    return (s0.particle_q.numpy().copy(),  s0.particle_qd.numpy().copy(),
+            s1.particle_q.numpy().copy(),  s1.particle_qd.numpy().copy(),
+            model.particle_flags.numpy().copy())
+
+
+def _restore_cloth(snap):
+    q0, qd0, q1, qd1, flags = snap
+    s0.particle_q.assign(q0); s0.particle_qd.assign(qd0)
+    s1.particle_q.assign(q1); s1.particle_qd.assign(qd1)
+    model.particle_flags.assign(flags)
+    wp.synchronize()
+
+
+GRAB_RADIUS = args.grab_radius   # grasp pinch radius (m): verts within this of the anchor get pinned (robot fingertip pinch ≈ 0.01)
 
 
 def _find_held(pcd_idx, pcd_to_mesh):
@@ -376,6 +446,38 @@ def _run_rl_infer(tmp_npz, tmp_json):
         return json.load(fh)
 
 
+def _run_student_infer(state_npz, out_json, greedy=False):
+    """Call student_infer.py (UV Mapper encode + StudentVLA sample). Returns action dict or None.
+    greedy=True → deterministic action (argmax grasp + mean drag) for eval."""
+    policy_path = args.student_policy or os.path.join(_ROOT, "checkpoints", "student_vla.pth")
+    mdl_path    = args.model or os.path.join(_ROOT, "checkpoints", "uv_mapper_best.pth")
+    cmd = ["conda", "run", "-n", args.infer_env, "--no-capture-output",
+           "python", os.path.join(_ROOT, "workers", "student_infer.py"),
+           "--npz", state_npz, "--out", out_json, "--policy", policy_path, "--model", mdl_path]
+    if greedy:
+        cmd.append("--greedy")
+    ret = subprocess.run(cmd, cwd=_ROOT, env=os.environ)
+    if ret.returncode != 0 or not os.path.exists(out_json):
+        print("[student] student_infer.py failed"); return None
+    with open(out_json) as fh:
+        return json.load(fh)
+
+
+def _run_student_update(buf_path, n):
+    """Call student_update.py for one PPO+GAE update over the last n rollout steps."""
+    policy_path = args.student_policy or os.path.join(_ROOT, "checkpoints", "student_vla.pth")
+    cmd = ["conda", "run", "-n", args.infer_env, "--no-capture-output",
+           "python", os.path.join(_ROOT, "workers", "student_update.py"),
+           "--buffer", buf_path, "--n", str(n), "--policy", policy_path,
+           "--gamma", str(args.rl_gamma), "--lam", str(args.rl_lambda),
+           "--clip", str(args.rl_clip), "--epochs", str(args.rl_epochs),
+           "--ent-weight", str(args.rl_ent_weight), "--vf-weight", str(args.rl_vf_weight)]
+    if args.rl_det_critic:
+        cmd.append("--deterministic-critic")
+    print(f"[student] PPO+GAE update on last {n} rollout steps ...")
+    subprocess.run(cmd, cwd=_ROOT, env=os.environ)
+
+
 _POST_RGB_PATH = os.path.join(_ROOT, "rl_reward_img.png")
 
 
@@ -444,38 +546,126 @@ def _uv_to_pcd_idx(grab_u, grab_v, uv_pred, pcd_xyz, centroid, exclude_world_pos
     return int(np.argmin(dists))   # fallback: closest regardless
 
 
-def _execute_drag_dual(a1, a2, pcd_to_mesh):
-    """Simultaneous 2-arm drag: pin both patches, drive independently each frame."""
-    held1, start1 = _find_held(a1["pcd_idx"], pcd_to_mesh)
-    held2, start2 = _find_held(a2["pcd_idx"], pcd_to_mesh)
-    held_all = np.concatenate([held1, held2])
-    _pin(held_all)
+def _polyline_point(pts, s):
+    """Point at arclength fraction s∈[0,1] along the polyline pts (M,3)."""
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    L   = float(seg.sum())
+    if L < 1e-9:
+        return pts[-1].astype(np.float32).copy()
+    target, acc = s * L, 0.0
+    for i in range(len(seg)):
+        if seg[i] < 1e-9:
+            continue
+        if acc + seg[i] >= target:
+            t = (target - acc) / seg[i]
+            return (pts[i] * (1 - t) + pts[i + 1] * t).astype(np.float32)
+        acc += seg[i]
+    return pts[-1].astype(np.float32).copy()
 
-    t1 = np.array([a1["dx"], a1["dy"], a1["dz"]], dtype=np.float32)
-    t2 = np.array([a2["dx"], a2["dy"], a2["dz"]], dtype=np.float32)
-    z1_cur = float(start1[:, 2].mean())
-    z2_cur = float(start2[:, 2].mean())
 
-    for i in range(args.rl_drag_fr):
+def _quat_to_R(q):
+    """Unit quaternion [x,y,z,w] → 3×3 rotation matrix (numpy, execution side)."""
+    x, y, z, w = (np.asarray(q, np.float64) / (np.linalg.norm(q) + 1e-9))
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
+        [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)]], np.float32)
+
+
+def _slerp(q0, q1, t):
+    """SLERP (spherical linear interpolation) between quaternions: glide along the shortest arc on the
+    rotation sphere at constant angular speed. Sign-aligned (q≡-q) so it never takes the long way."""
+    q0 = np.asarray(q0, np.float64) / (np.linalg.norm(q0) + 1e-9)
+    q1 = np.asarray(q1, np.float64) / (np.linalg.norm(q1) + 1e-9)
+    d = float(np.dot(q0, q1))
+    if d < 0.0:                                             # flip to the nearer hemisphere
+        q1, d = -q1, -d
+    if d > 0.9995:                                          # near-parallel → plain lerp (avoids /sin≈0)
+        q = q0 + t * (q1 - q0)
+        return q / (np.linalg.norm(q) + 1e-9)
+    th0 = np.arccos(d); s0 = np.sin(th0)
+    return (np.sin(th0 * (1 - t)) / s0) * q0 + (np.sin(th0 * t) / s0) * q1
+
+
+def _polyline_quat(pts, quats, s):
+    """Orientation at arclength fraction s∈[0,1] along the polyline pts (M,3), SLERPing the per-vertex
+    quats — mirrors _polyline_point so rotation and position advance together."""
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    L   = float(seg.sum())
+    if L < 1e-9:
+        return np.asarray(quats[-1], np.float64)
+    target, acc = s * L, 0.0
+    for i in range(len(seg)):
+        if seg[i] < 1e-9:
+            continue
+        if acc + seg[i] >= target:
+            return _slerp(quats[i], quats[i + 1], (target - acc) / seg[i])
+        acc += seg[i]
+    return np.asarray(quats[-1], np.float64)
+
+
+ROT_PIVOT_OFFSET = 0.05    # wrist pivot sits 5 cm above the grasped patch, along the patch normal
+
+
+def _execute_drag_path(arm, pcd_to_mesh, centroid):
+    """Single-arm grab+drag: pin the grab patch, follow grab → path → release, applying the per-waypoint
+    WRIST ROTATION about a pivot ROT_PIVOT_OFFSET above the patch along its mean normal — so rotating the
+    wrist sweeps the patch through an arc (folding), not a spin in place.
+
+    arm["release"]/arm["path"] are XY-rel-centroid, Z-absolute. arm["path_quat"]/["release_quat"] are the
+    [x,y,z,w] wrist orientations per waypoint; absent (Haiku/scripted/manual) ⇒ identity ⇒ the transform
+    collapses to the original pure-translation drag (unchanged behaviour)."""
+    held, start = _find_held(arm["pcd_idx"], pcd_to_mesh)
+    grab_world  = start.mean(0).astype(np.float32)          # grasp anchor (world)
+    cx, cy = float(centroid[0]), float(centroid[1])
+    to_world = lambda p: np.array([cx + p[0], cy + p[1], p[2]], dtype=np.float32)
+
+    traj = np.array([grab_world] + [to_world(p) for p in arm["path"]] + [to_world(arm["release"])],
+                    dtype=np.float32)
+
+    # orientation keyframes aligned 1:1 with traj. Grab keyframe = first waypoint's orientation (no
+    # reorientation on the grab→first-waypoint leg); the rest are the model's per-waypoint quats.
+    ident = list(il_dataset.IDENTITY_QUAT)
+    pq = arm.get("path_quat") or [ident] * len(arm["path"])
+    rq = arm.get("release_quat") or ident
+    wp_quats = [list(q) for q in pq] + [list(rq)]           # aligned with traj[1:]
+    quats = [wp_quats[0]] + wp_quats                        # prepend grab keyframe → aligned with traj
+    R0 = _quat_to_R(quats[0])
+
+    # pivot 5 cm above the patch along its mean normal; the patch is rigid about it
+    nrm = estimate_normals(verts(), k=args.normal_k)[held].mean(0)
+    nrm = (nrm / (np.linalg.norm(nrm) + 1e-9)).astype(np.float32)
+    rel = (start - (grab_world + ROT_PIVOT_OFFSET * nrm)).astype(np.float32)   # offsets from pivot at grasp
+
+    def patch_target(frac):
+        e = _ease(frac)
+        T = _polyline_point(traj, e)
+        R = _quat_to_R(_polyline_quat(traj, quats, e))
+        pivot = T + ROT_PIVOT_OFFSET * nrm
+        return (pivot + rel @ (R @ R0.T).T).astype(np.float32)                 # (H,3) world targets
+
+    _pin(held)
+    # constant drag speed: derive frame count from total path length (sim runs at 60 Hz)
+    path_len = float(np.linalg.norm(np.diff(traj, axis=0), axis=1).sum())
+    n_frames = int(np.clip(round(path_len / max(args.drag_speed, 1e-3) * 60.0), 20, 1500))
+    print(f"[vla] drag {path_len:.3f}m @ {args.drag_speed:g} m/s → {n_frames} frames ({n_frames/60.0:.2f}s)")
+
+    for i in range(n_frames):
         if not simulation_app.is_running(): break
-        t = _ease((i + 1) / args.rl_drag_fr)
-        off1 = np.array([t1[0]*t, t1[1]*t,
-                         z1_cur + (t1[2] - z1_cur) * min(t*3, 1.0)], dtype=np.float32)
-        off2 = np.array([t2[0]*t, t2[1]*t,
-                         z2_cur + (t2[2] - z2_cur) * min(t*3, 1.0)], dtype=np.float32)
-        _drive([held1, held2], [start1, start2], [off1, off2])
+        _drive([held], [start], [patch_target((i + 1) / n_frames) - start])
         step(); _render()
 
+    rel_tgt = patch_target(1.0)                             # hold at release
     for _ in range(10):
         if not simulation_app.is_running(): break
-        _drive([held1, held2], [start1, start2], [t1, t2])
+        _drive([held], [start], [rel_tgt - start])
         step(); _render()
 
-    _unpin(held_all)
-    print(f"[rl] settling {args.rl_settle} frames ...")
+    _unpin(held)
+    print(f"[vla] settling {args.rl_settle} frames ...")
     for i in range(args.rl_settle):
         if not simulation_app.is_running(): break
-        step(); pump(i, "rl-settle ")
+        step(); pump(i, "vla-settle ")
 
     _save_post_rgb(_POST_RGB_PATH)
 
@@ -550,10 +740,15 @@ def _render_uv_overlay(state_npz, uv_path, rgb_path, out_path=_UV_OVERLAY_PATH):
         if 0 <= px < W and 0 <= py < H:
             dcam.ellipse([px-1, py-1, px+1, py+1], fill=_uv_dot_color(uv[i, 0], uv[i, 1]))
 
-    # RIGHT: fixed true flat UV template
-    S   = H                                                    # square panel, 480
-    uvp = _flat_uv_panel(S)
-    dvp = ImageDraw.Draw(uvp)
+    # LEFT (target): the canonical flat silhouette + orientation the fabric must fill, centred on
+    # the cloud centroid (= action-frame origin) and projected with the SAME camera model. The
+    # offsets are centroid-relative, so cx,cy cancel; the outline lies on the table (z=_TABLE_Z).
+    ddt = max(CAM_Z - _TABLE_Z, 1e-4)
+    for poly in _flat_target_contour():
+        pts = [(ox / ddt * CAM_FX + CAM_CX, -oy / ddt * CAM_FY + CAM_CY) for ox, oy in poly]
+        if len(pts) > 1:
+            dcam.line([(int(x), int(y)) for x, y in pts] + [(int(pts[0][0]), int(pts[0][1]))],
+                      fill=(255, 255, 255), width=3)
 
     try:    font = ImageFont.load_default()
     except: font = None
@@ -561,19 +756,25 @@ def _render_uv_overlay(state_npz, uv_path, rgb_path, out_path=_UV_OVERLAY_PATH):
         try:    draw.text(xy, text, fill=fill, font=font, stroke_width=1, stroke_fill=(0, 0, 0))
         except TypeError:  draw.text(xy, text, fill=fill, font=font)
 
+    # MAIN image = the overhead camera: crumpled garment (UV-coloured) with the white target outline
+    # laid on the floor behind it. SIDE = a small flat-UV reference window (the colour key only).
+    SIDE = 200
+    uvp  = _flat_uv_panel(SIDE)
+    dvp  = ImageDraw.Draw(uvp)
     for t in (0.0, 0.5, 1.0):                                  # UV axis ticks
-        x = int(t * (S - 1)); _label(dvp, (min(x, S - 26), S - 13), f"u={t:.1f}")
-        y = int((1.0 - t) * (S - 1)); _label(dvp, (2, min(max(y - 6, 0), S - 13)), f"v={t:.1f}")
+        x = int(t * (SIDE - 1)); _label(dvp, (min(x, SIDE - 26), SIDE - 13), f"u={t:.1f}")
+        y = int((1.0 - t) * (SIDE - 1)); _label(dvp, (2, min(max(y - 6, 0), SIDE - 13)), f"v={t:.1f}")
 
-    # compose side by side
     gap    = 12
-    canvas = Image.new("RGB", (W + gap + S, H), (0, 0, 0))
+    canvas = Image.new("RGB", (W + gap + SIDE, H), (0, 0, 0))
     canvas.paste(cam, (0, 0))
-    canvas.paste(uvp, (W + gap, 0))
+    canvas.paste(uvp, (W + gap, 0))                            # small reference, top of the side strip
     dc = ImageDraw.Draw(canvas)
-    _label(dc, (6, 6),         "LEFT: overhead camera (crumpled) — colour = predicted UV (R=u,G=v)")
-    _label(dc, (6, 20),        "grab raised/bunched fabric here")
-    _label(dc, (W + gap + 6, 6), "RIGHT: TRUE flat UV layout (where fabric belongs)")
+    _label(dc, (6, 6),  "MAIN: overhead camera — fabric coloured by predicted UV (R=u,G=v)")
+    _label(dc, (6, 20), "WHITE outline on the floor = goal flat shape + orientation; fill it",
+           fill=(255, 255, 255))
+    _label(dc, (W + gap + 4, SIDE + 4), "ref: flat UV", fill=(200, 200, 200))
+    _label(dc, (W + gap + 4, SIDE + 18), "(colour key)", fill=(200, 200, 200))
     canvas.save(out_path)
     return out_path
 
@@ -583,9 +784,9 @@ _UV_PRED_PATH = os.path.join(_tempfile.gettempdir(), "uv_pred.npy")   # last pre
 
 
 def _run_vlm_action(state_npz):
-    """UV-infer → render overlay → Haiku picks 2-arm grabs in UV space → resolve to pcd indices.
-    Returns (a1, a2) dicts with pcd_idx, grab_u/v, grab_xyz, reasoning + drag; or (None, None).
-    Leaves the predicted UV at _UV_PRED_PATH for the IL logger."""
+    """UV-infer → render overlay → Haiku picks ONE grab (UV) + release + path → resolve grab to a
+    pcd index. Returns (arm, centroid) where arm has pcd_idx, grab_u/v, release, path, grab_xyz,
+    reasoning; or (None, None). Leaves the predicted UV at _UV_PRED_PATH for the IL logger."""
     uv_out  = _UV_PRED_PATH
     tmp_out = os.path.join(_tempfile.gettempdir(), "vlm_action_out.json")
 
@@ -611,26 +812,18 @@ def _run_vlm_action(state_npz):
     centroid = d["centroid"].astype(np.float32)
     uv_pred  = np.load(uv_out).astype(np.float32)
 
-    arm1_d, arm2_d = data["arm1"], data["arm2"]
-
-    idx1   = _uv_to_pcd_idx(arm1_d["grab_u"], arm1_d["grab_v"], uv_pred, pcd_xyz, centroid)
-    world1 = pcd_xyz[idx1] + centroid
-    idx2   = _uv_to_pcd_idx(arm2_d["grab_u"], arm2_d["grab_v"], uv_pred, pcd_xyz, centroid,
-                            exclude_world_pos=world1)
-
-    def _arm(idx, src):
-        return {"pcd_idx": idx,
-                "grab_u": float(src["grab_u"]), "grab_v": float(src["grab_v"]),
-                "grab_xyz": (pcd_xyz[idx] + centroid).tolist(),
-                "reasoning": src.get("reasoning", ""),
-                "dx": src["dx"], "dy": src["dy"], "dz": src["dz"]}
-
-    a1 = _arm(idx1, arm1_d)
-    a2 = _arm(idx2, arm2_d)
-    print(f"[vla] arm1 pcd={idx1} uv=({uv_pred[idx1,0]:.2f},{uv_pred[idx1,1]:.2f})  "
-          f"arm2 pcd={idx2} uv=({uv_pred[idx2,0]:.2f},{uv_pred[idx2,1]:.2f})  "
-          f"sep={np.linalg.norm(pcd_xyz[idx2]-pcd_xyz[idx1]):.3f}m")
-    return a1, a2
+    src = data["arm1"]
+    idx = _uv_to_pcd_idx(src["grab_u"], src["grab_v"], uv_pred, pcd_xyz, centroid)
+    arm = {"pcd_idx":  idx,
+           "grab_u":   float(src["grab_u"]), "grab_v": float(src["grab_v"]),
+           "release":  [float(c) for c in src["release"]],
+           "path":     [[float(c) for c in p] for p in src["path"]],
+           "grab_xyz": (pcd_xyz[idx] + centroid).tolist(),
+           "reasoning": src.get("reasoning", "")}
+    r = arm["release"]
+    print(f"[vla] grab pcd={idx} uv=({uv_pred[idx,0]:.2f},{uv_pred[idx,1]:.2f})  "
+          f"release=({r[0]:.2f},{r[1]:.2f},{r[2]:.2f})  +{len(arm['path'])} waypoints")
+    return arm, centroid
 
 
 VLM_WEIGHT = 0.3
@@ -671,6 +864,189 @@ def _compute_reward():
     return reward
 
 
+# ── flat-template reward (StudentVLA / --rl-student) ───────────────────────────────────────────
+# Goal: "get the garment as close to the canonical FLAT layout as possible." Built from the flat
+# template (FLAT_REF_PTS) + ground-truth per-vertex UV (PANEL_UV_ALL), pose-invariant so a perfect
+# flatten that lands shifted/rotated on the table is NOT punished for its table placement.
+FLAT_W_SHAPE = 1.0     # weight: 2D-aligned per-vertex XY distance to flat (shape + UV match)  (main)
+FLAT_W_FLAT  = 0.5     # weight: |mean(z) - table| — net lift off the table        (lie-flat term)
+FLAT_W_COV   = 0.5     # weight: top-down outline IoU vs the flat footprint        (silhouette term)
+FLAT_GRID    = 96      # raster resolution for the outline-coverage IoU
+_TABLE_Z     = float(FLAT_REF_PTS[:, 2].mean())   # table height of the flat template
+
+
+def _align_xy(P, Q):
+    """Best-fit rigid transform (rotation + translation) in the table plane mapping P→Q (Kabsch,
+    exact: P,Q share vertex correspondence). Z is left untouched. Returns aligned copy of P."""
+    Pxy, Qxy = P[:, :2], Q[:, :2]
+    pc, qc   = Pxy.mean(0), Qxy.mean(0)
+    H = (Pxy - pc).T @ (Qxy - qc)
+    U, _, Vt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    R = Vt.T @ np.array([[1, 0], [0, d]], np.float64) @ U.T
+    out = P.copy()
+    out[:, :2] = (Pxy - pc) @ R.T + qc
+    return out
+
+
+def _footprint_mask(xy, lo, cell, G):
+    """Rasterise an XY point set into a (G,G) occupancy mask."""
+    ij = np.floor((xy - lo) / cell).astype(np.int32)
+    ok = (ij[:, 0] >= 0) & (ij[:, 0] < G) & (ij[:, 1] >= 0) & (ij[:, 1] < G)
+    m  = np.zeros((G, G), bool)
+    m[ij[ok, 1], ij[ok, 0]] = True
+    return m
+
+
+# precompute the flat template's raster frame + footprint once
+_FLAT_LO   = FLAT_REF_PTS[:, :2].min(0) - 0.05
+_FLAT_HI   = FLAT_REF_PTS[:, :2].max(0) + 0.05
+_FLAT_CELL = float((_FLAT_HI - _FLAT_LO).max()) / FLAT_GRID
+_FLAT_MASK = _footprint_mask(FLAT_REF_PTS[:, :2], _FLAT_LO, _FLAT_CELL, FLAT_GRID)
+
+
+def _flat_target_contour():
+    """Outline polygons of the canonical FLAT garment silhouette, as XY offsets (metres) from the
+    template's own centre. Drawn on the LEFT camera panel (centred on the cloud centroid) so Haiku
+    sees the exact shape + ORIENTATION the fabric must fill. Fixed orientation ⇒ rotation-variant
+    target: the garment must be turned into this pose, not just any flat one. Cached."""
+    cache = getattr(_flat_target_contour, "_cache", None)
+    if cache is not None:
+        return cache
+    polys = []
+    try:
+        import cv2
+        cnts, _ = cv2.findContours(_FLAT_MASK.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        tcen = FLAT_REF_PTS[:, :2].mean(0)
+        for c in cnts:
+            if len(c) < 3:
+                continue
+            ij = c[:, 0, :].astype(np.float64)                 # (P,2) = (col=x, row=y)
+            xy = _FLAT_LO + (ij + 0.5) * _FLAT_CELL            # template world XY
+            polys.append((xy - tcen).astype(np.float32))       # centre-relative offsets
+    except Exception:
+        pass
+    _flat_target_contour._cache = polys
+    return polys
+
+
+def _flat_reward(verbose=True):
+    """How close the garment is to the base FLAT 2D shape. Returns (reward, components dict).
+      shape : mean per-vertex 2D (XY) distance after rigid alignment to FLAT_REF_PTS. Each vertex
+              carries its UV, so this is exactly 'every UV-fabric region sitting in its flat 2D
+              place' = the base-flat-shape + UV-distribution match. (the core term)
+      height: |mean(z) - table| — the net lift off the table (difference in MEAN height, NOT a
+              per-vertex total-height penalty). Light flatness term.
+      iou   : top-down outline IoU vs the flat footprint (overall 2D silhouette / no fold-under).
+    reward = -(W_SHAPE*shape + W_FLAT*height) + W_COV*iou."""
+    p  = verts()
+    pa = _align_xy(p, FLAT_REF_PTS)
+    shape  = float(np.mean(np.linalg.norm(pa[:, :2] - FLAT_REF_PTS[:, :2], axis=1)))   # 2D shape / UV match
+    height = float(abs(p[:, 2].mean() - _TABLE_Z))                                     # net lift (mean diff)
+    cur    = _footprint_mask(pa[:, :2], _FLAT_LO, _FLAT_CELL, FLAT_GRID)
+    inter  = np.logical_and(cur, _FLAT_MASK).sum()
+    union  = np.logical_or(cur, _FLAT_MASK).sum()
+    iou    = float(inter / union) if union else 0.0
+    reward = -(FLAT_W_SHAPE * shape + FLAT_W_FLAT * height) + FLAT_W_COV * iou
+    if verbose:
+        print(f"[flat] reward={reward:.4f}  shape={shape*100:.1f}cm  height={height*100:.1f}cm  iou={iou:.3f}")
+    return reward, {"shape": shape, "height": height, "iou": iou}
+
+
+def _render_flat_overlay(path, S=360):
+    """Diagnostic PNG: LEFT = flat target (UV-coloured), RIGHT = current garment 2D-aligned to the
+    template (UV-coloured) with the flat OUTLINE overlaid in white. Watch RIGHT converge onto LEFT."""
+    from PIL import Image, ImageDraw
+    span = float((_FLAT_HI - _FLAT_LO).max())
+    def _to_px(xy):
+        q = (xy - _FLAT_LO) / span
+        return (q[:, 0] * (S - 1)).astype(np.int32), ((1 - q[:, 1]) * (S - 1)).astype(np.int32)
+    def _panel(xy, draw_outline):
+        img = Image.new("RGB", (S, S), (12, 12, 16)); d = ImageDraw.Draw(img)
+        px, py = _to_px(xy)
+        for i in range(0, len(xy), 3):                       # subsample for speed
+            if 0 <= px[i] < S and 0 <= py[i] < S:
+                d.point((px[i], py[i]), fill=_uv_dot_color(PANEL_UV_ALL[i, 0], PANEL_UV_ALL[i, 1]))
+        if draw_outline:                                     # flat footprint contour in white
+            try:
+                import cv2
+                cnts, _ = cv2.findContours(_FLAT_MASK.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for c in cnts:
+                    pts = [((int(x) + 0.5) / FLAT_GRID * S, (1 - (int(y) + 0.5) / FLAT_GRID) * S)
+                           for x, y in c[:, 0, :]]
+                    if len(pts) > 1: d.line(pts + [pts[0]], fill=(255, 255, 255), width=1)
+            except Exception: pass
+        return img
+    pa = _align_xy(verts(), FLAT_REF_PTS)
+    canvas = Image.new("RGB", (2 * S + 12, S), (0, 0, 0))
+    canvas.paste(_panel(FLAT_REF_PTS[:, :2], False), (0, 0))
+    canvas.paste(_panel(pa[:, :2], True),            (S + 12, 0))
+    canvas.save(path)
+    return path
+
+
+def _clamp_wp(p, centroid):
+    """Safety-clamp a sampled waypoint into the FIXED world workspace box (the arm's physical reach):
+    world XY within [center ± arm_box_half], Z in [0, arm_box_zmax]. The box is anchored at the spawn
+    (--arm-box-cx/cy) and does NOT move with the cloth. p is centroid-relative XY + absolute Z, so we
+    add the centroid to get world, clamp there, then subtract it back to keep the pipeline's
+    centroid-relative frame unchanged."""
+    cx, cy = float(centroid[0]), float(centroid[1])
+    h, bx, by = args.arm_box_half, args.arm_box_cx, args.arm_box_cy
+    wx = float(np.clip(cx + p[0], bx - h, bx + h))     # clamp in WORLD
+    wy = float(np.clip(cy + p[1], by - h, by + h))
+    return [wx - cx, wy - cy, float(np.clip(p[2], 0.0, args.arm_box_zmax))]
+
+
+def _in_box(world_xy):
+    """True where a world XY lies inside the fixed workspace box."""
+    h, bx, by = args.arm_box_half, args.arm_box_cx, args.arm_box_cy
+    return (np.abs(world_xy[..., 0] - bx) <= h) & (np.abs(world_xy[..., 1] - by) <= h)
+
+
+def _student_arm(act, pcd_xyz, centroid):
+    """Resolve a student action dict → an executable arm for _execute_drag_path. The policy picks a
+    point INDEX directly (grasp head is a Categorical over the same cloud head_RL captured), so use it
+    as-is; fall back to nearest predicted-UV only for legacy/odd indices.
+
+    The arm may only act INSIDE the fixed workspace box (--arm-box-*). Drag waypoints are clamped into
+    it. The grab must also be in-box: if the policy's grab point has drifted OUTSIDE, we DON'T grab
+    there — instead a RECOVERY move grabs the nearest in-box cloth point and drags it toward the box
+    centre to pull the garment back into reach (arm["recovery"]=True; head_RL skips logging it to the
+    PPO buffer, so this safety override never trains the policy off its own samples)."""
+    idx = int(act.get("grab_idx", -1))
+    if not (0 <= idx < len(pcd_xyz)):
+        uv_pred = np.load(act["uv_pred_path"]).astype(np.float32)
+        idx     = _uv_to_pcd_idx(act["grab_u"], act["grab_v"], uv_pred, pcd_xyz, centroid)
+
+    world  = pcd_xyz + centroid                                   # (N,3) cloth points in world
+    in_box = _in_box(world[:, :2])
+
+    if in_box[idx]:                                               # normal: policy grab is reachable
+        return {"pcd_idx": idx, "grab_u": act["grab_u"], "grab_v": act["grab_v"],
+                "release": _clamp_wp(act["release"], centroid),
+                "path": [_clamp_wp(p, centroid) for p in act["path"]],
+                "path_quat": act.get("path_quat"), "release_quat": act.get("release_quat"),
+                "grab_xyz": world[idx].tolist(), "recovery": False}
+
+    # RECOVERY: grab the in-box cloth point nearest the (unreachable) chosen grab, then drag it a
+    # capped step toward the box centre. Pure translation (identity rotation), no path waypoints.
+    ctr = np.array([args.arm_box_cx, args.arm_box_cy], np.float32)
+    if in_box.any():
+        cand = np.where(in_box)[0]
+        ridx = int(cand[np.argmin(np.linalg.norm(world[cand, :2] - world[idx, :2], axis=1))])
+    else:                                                         # whole cloth outside box (extreme)
+        ridx = int(np.argmin(np.linalg.norm(world[:, :2] - ctr, axis=1)))
+    to_ctr = ctr - world[ridx, :2]
+    dist   = float(np.linalg.norm(to_ctr))
+    tgt_xy = world[ridx, :2] + (to_ctr / (dist + 1e-9)) * min(dist, args.recovery_step)
+    release = [float(tgt_xy[0] - centroid[0]), float(tgt_xy[1] - centroid[1]), float(_TABLE_Z)]
+    print(f"[student] grab outside box → RECOVERY: grab {idx}→{ridx}, drag {min(dist, args.recovery_step):.2f}m toward centre")
+    return {"pcd_idx": ridx, "grab_u": act["grab_u"], "grab_v": act["grab_v"],
+            "release": release, "path": [], "path_quat": [], "release_quat": list(il_dataset.IDENTITY_QUAT),
+            "grab_xyz": world[ridx].tolist(), "recovery": True}
+
+
 def _append_buffer(record, buf_path):
     buf = []
     if os.path.exists(buf_path):
@@ -692,6 +1068,170 @@ def _training_step(buf_path):
            "--policy", policy_path]
     print(f"[rl] running training step ...")
     subprocess.run(cmd, cwd=_ROOT)
+
+
+# ── manual mouse-drag mode (--manual) ────────────────────────────────────────────────────
+def _project_verts(p, cx, cy):
+    """World (N,3) → overhead-camera pixels (N,2). Same model as _render_uv_overlay."""
+    dd  = np.maximum(CAM_Z - p[:, 2], 1e-4)
+    upx = (p[:, 0] - cx) / dd * CAM_FX + CAM_CX
+    vpx = -(p[:, 1] - cy) / dd * CAM_FY + CAM_CY
+    return np.stack([upx, vpx], axis=1)
+
+
+def _pixel_to_world_xy(px, py, z, cx, cy):
+    """Inverse projection at a KNOWN height z → world (x,y). The overhead cam points
+    straight down, so the image plane is world-XY and holding z fixed = pure XY drag."""
+    dd = CAM_Z - z
+    wx = (px - CAM_CX) / CAM_FX * dd + cx
+    wy = -(py - CAM_CY) / CAM_FY * dd + cy
+    return float(wx), float(wy)
+
+
+def _capture_overhead(warmup=1):
+    """Sync live cloth into the vis mesh and grab one overhead RGB frame (uint8, no alpha)."""
+    vmesh.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(verts()))
+    for _ in range(warmup):
+        world.step(render=True); rep.orchestrator.step(pause_timeline=False)
+    rraw = rgb_ann.get_data()
+    rgb  = np.asarray(rraw.get("data", rraw) if isinstance(rraw, dict) else rraw)
+    if rgb.ndim == 3 and rgb.shape[2] == 4: rgb = rgb[:, :, :3]
+    return rgb.astype(np.uint8)
+
+
+def _manual_loop():
+    """Click a point on the overhead view to grab it, drag with the mouse (Z locked at pickup
+    height, wheel raises/lowers), release to drop and settle. Each drag is logged as an IL
+    sample (source='manual') so human demos feed the same dataset as the Haiku teacher."""
+    import matplotlib
+    matplotlib.use("TkAgg")          # interactive window (fold's cv2 is headless → no imshow)
+    import matplotlib.pyplot as plt
+
+    def _capture_state():
+        npz = "/tmp/manual_state.npz"
+        _capture_rl_state(npz)                       # places cam at cloth centroid, writes state
+        d   = np.load(npz)
+        uvp = None
+        if args.il and _run_uv_infer(npz, _UV_PRED_PATH):
+            try: uvp = np.load(_UV_PRED_PATH).astype(np.float32)
+            except Exception: uvp = None
+        return npz, d["pcd_xyz"].astype(np.float32), d["centroid"].astype(np.float32), uvp
+
+    tmp_npz, pcd_xyz, centroid, uv_pred = _capture_state()
+    cx, cy = float(centroid[0]), float(centroid[1])  # fixed cam centre (matches _capture_rl_state)
+
+    M = {"down": False, "px": (0, 0), "held": None, "start": None, "z": 0.0,
+         "grab_world": None, "grab_pcd": -1, "path": [], "release": False}
+
+    def _begin_grab(px, py):
+        p   = verts()
+        d2  = np.sum((_project_verts(p, cx, cy) - np.array([px, py]))**2, axis=1)
+        near = np.where(d2 < 14.0**2)[0]
+        anchor = int(near[np.argmax(p[near, 2])]) if len(near) else int(d2.argmin())  # topmost layer
+        held = np.where(np.linalg.norm(p - p[anchor], axis=1) < GRAB_RADIUS)[0]
+        if len(held) == 0: held = np.array([anchor])
+        world_xyz = (pcd_xyz + centroid)
+        M.update(down=True, held=held, start=p[held].copy(), z=float(p[anchor, 2]),
+                 grab_world=p[held].mean(0).astype(np.float32), path=[],
+                 grab_pcd=int(np.argmin(np.linalg.norm(world_xyz - p[anchor], axis=1))))
+        _pin(held)
+        print(f"[manual] grab vert={anchor}  {len(held)} verts  z={M['z']:.3f}")
+
+    def _log_manual():
+        if not (args.il and uv_pred is not None and M["grab_pcd"] >= 0):
+            return
+        i  = M["grab_pcd"]
+        # full traj grab → mouse waypoints → release, resampled to PATH_LEN points spread
+        # evenly by arclength (so the 5 saved points span the whole drag, not just its start).
+        traj = np.array([M["grab_world"]] + M["path"], dtype=np.float32)
+        if len(traj) == 1:
+            traj = np.vstack([traj, traj])
+        to_frame = lambda w: [float(w[0] - cx), float(w[1] - cy), float(w[2])]
+        release  = to_frame(traj[-1])
+        path     = [to_frame(_polyline_point(traj, (j + 1) / (il_dataset.PATH_LEN + 1)))
+                    for j in range(il_dataset.PATH_LEN)]
+        try:
+            d = np.load(tmp_npz)
+            state  = {"pcd_xyz": d["pcd_xyz"], "normals": d["normals"],
+                      "uv_pred": uv_pred,      "centroid": d["centroid"]}
+            action = {"arm1": il_dataset.make_arm(
+                          float(uv_pred[i, 0]), float(uv_pred[i, 1]), release, path,
+                          grab_quat=il_dataset.IDENTITY_QUAT,   # mouse = vertical-down approach
+                          grab_xyz=M["grab_world"], grab_pcd_idx=i, reasoning="manual mouse drag")}
+            sid = il_dataset.record_sample(IL_DIR, "manual", state, action)
+            print(f"[il] logged {sid}  ({il_dataset.count(IL_DIR)} samples total)")
+        except Exception as e:
+            print(f"[il] WARNING: failed to log sample: {e}")
+
+    def _end_grab():
+        _unpin(M["held"])
+        print(f"[manual] release → settling {args.rl_settle} frames ...")
+        for _ in range(args.rl_settle):
+            if not simulation_app.is_running(): break
+            step()
+        _log_manual()
+        M["down"] = False
+
+    M["recrumple"] = M["quit"] = False
+
+    def on_press(e):
+        if e.button == 1 and not M["down"] and e.xdata is not None:
+            _begin_grab(e.xdata, e.ydata)
+    def on_move(e):
+        if e.xdata is not None: M["px"] = (e.xdata, e.ydata)
+    def on_release(e):
+        if e.button == 1 and M["down"]:
+            if e.xdata is not None: M["px"] = (e.xdata, e.ydata)
+            M["release"] = True
+    def on_scroll(e):
+        if M["down"]: M["z"] += args.manual_z_step * (1 if e.button == "up" else -1)
+    def on_key(e):
+        if e.key == "q": M["quit"] = True
+        elif e.key == "r" and not M["down"]: M["recrumple"] = True
+
+    plt.ion()
+    fig, ax = plt.subplots()
+    im = ax.imshow(_capture_overhead(1))
+    ax.set_title("LMB drag = grab+move   wheel = Z   r = re-crumple   q = quit")
+    marker, = ax.plot([], [], "o", mfc="none", mec="lime", ms=14, mew=2)
+    txt = ax.text(8, 24, "", color="yellow", fontsize=10)
+    for ev, cb in (("button_press_event", on_press), ("motion_notify_event", on_move),
+                   ("button_release_event", on_release), ("scroll_event", on_scroll),
+                   ("key_press_event", on_key)):
+        fig.canvas.mpl_connect(ev, cb)
+    print("[manual] LMB drag = grab+move | wheel = raise/lower Z | r = re-crumple | q = quit")
+    try:
+        while simulation_app.is_running() and not M["quit"] and plt.fignum_exists(fig.number):
+            if M["release"]:
+                M["release"] = False
+                _end_grab()
+            elif M["down"]:
+                tx, ty = _pixel_to_world_xy(M["px"][0], M["px"][1], M["z"], cx, cy)
+                tgt = np.array([tx, ty, M["z"]], dtype=np.float32)
+                _drive([M["held"]], [M["start"]], [tgt - M["grab_world"]])
+                if not M["path"] or np.linalg.norm(tgt - M["path"][-1]) > 0.01:
+                    M["path"].append(tgt.copy())
+            step()
+
+            im.set_data(_capture_overhead(1))
+            if M["down"]:
+                marker.set_data([M["px"][0]], [M["px"][1]]); txt.set_text(f"z={M['z']:.3f}")
+            else:
+                marker.set_data([], []); txt.set_text("")
+            fig.canvas.draw_idle(); fig.canvas.flush_events()
+            plt.pause(0.001)
+
+            if M["recrumple"]:
+                M["recrumple"] = False
+                print("[manual] re-crumpling ...")
+                _reset_cloth(); _crumple()
+                tmp_npz, pcd_xyz, centroid, uv_pred = _capture_state()
+                cx, cy = float(centroid[0]), float(centroid[1])
+                im.set_data(_capture_overhead(1))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        plt.close("all")
 
 
 # ── 6. Main loop ─────────────────────────────────────────────────────────────────────────
@@ -804,8 +1344,13 @@ if args.rl and simulation_app.is_running():
     except KeyboardInterrupt:
         pass
 
+# ── manual mouse-drag loop (--manual) ─────────────────────────────────────────────────────
+if args.manual and simulation_app.is_running():
+    _reset_cloth(); _crumple()
+    _manual_loop()
+
 # ── VLA loop (default — Haiku drives 2 arms from UV+xyz state) ─────────────────────────────
-if not args.rl and simulation_app.is_running():
+if not args.rl and not args.manual and not args.rl_student and not args.student_eval and not args.scripted and simulation_app.is_running():
     episode = 0
     try:
         while simulation_app.is_running():
@@ -825,13 +1370,13 @@ if not args.rl and simulation_app.is_running():
                 if pcd_to_mesh is None:
                     break
 
-                a1, a2 = _run_vlm_action(tmp_npz)
+                a1, centroid = _run_vlm_action(tmp_npz)
                 if a1 is None:
                     print("[vla] vlm_action failed — skipping turn")
                     break
 
                 flat_before = _flatness()
-                _execute_drag_dual(a1, a2, pcd_to_mesh)
+                _execute_drag_path(a1, pcd_to_mesh, centroid)
                 flat_after  = _flatness()
 
                 reward = _compute_reward()
@@ -847,13 +1392,9 @@ if not args.rl and simulation_app.is_running():
                                   "uv_pred": uv,           "centroid": d["centroid"]}
                         action = {
                             "arm1": il_dataset.make_arm(a1["grab_u"], a1["grab_v"],
-                                        a1["dx"], a1["dy"], a1["dz"],
+                                        a1["release"], a1["path"],
                                         grab_xyz=a1["grab_xyz"], grab_pcd_idx=a1["pcd_idx"],
                                         reasoning=a1.get("reasoning", "")),
-                            "arm2": il_dataset.make_arm(a2["grab_u"], a2["grab_v"],
-                                        a2["dx"], a2["dy"], a2["dz"],
-                                        grab_xyz=a2["grab_xyz"], grab_pcd_idx=a2["pcd_idx"],
-                                        reasoning=a2.get("reasoning", "")),
                         }
                         sid = il_dataset.record_sample(
                             IL_DIR, "haiku", state, action,
@@ -868,6 +1409,256 @@ if not args.rl and simulation_app.is_running():
                 try: os.unlink(tmp_npz)
                 except: pass
 
+    except KeyboardInterrupt:
+        pass
+
+# ── RL-student loop (--rl-student — MULTI-STEP PPO+GAE on the StudentVLA policy) ─────────────
+# A grab is NOT scored by its own immediate result — it is scored by the discounted future of the
+# whole smoothing SEQUENCE it belongs to, so a tension-building move that lowers flatness now is
+# rewarded for the larger gain it unlocks two grabs later. Per crumpled state we branch K full
+# sequences (best-of-N diversity from one start); each sequence runs --rl-turns grabs, and every
+# grab logs (state, action, per-step flatness improvement r_t, trajectory id, done). student_update
+# forms the GAE advantage + discounted return per trajectory and does a clipped PPO update; the
+# critic head V(s) is the baseline. One buffer entry == one grab.
+if args.rl_student and simulation_app.is_running():
+    buf_path = args.student_buffer
+    K        = max(1, args.rl_group_k)          # sequences branched from each crumple
+    T        = args.rl_turns                    # grabs per sequence
+    episode  = 0
+    try:
+        while simulation_app.is_running():
+            episode += 1
+            print(f"\n[student] ══ episode {episode}  ({K} branch × {T} turns, PPO+GAE) ══")
+            _reset_cloth()
+            _crumple()
+            snap = _snapshot_cloth()            # every branch replays from this identical crumple
+
+            for k in range(K):
+                if not simulation_app.is_running():
+                    break
+                _restore_cloth(snap)
+                traj          = f"{episode}_{k}"
+                phi_prev, _   = _flat_reward(verbose=False)       # Φ(s_0) for this branch
+                ret           = 0.0
+                for t in range(T):
+                    if not simulation_app.is_running():
+                        break
+                    tmp_npz  = f"/tmp/student_{traj}_t{t}.npz"     # one state per grab (cloth evolves)
+                    tmp_json = f"/tmp/student_act_{traj}_t{t}.json"
+                    pcd_to_mesh = _capture_rl_state(tmp_npz)
+                    if pcd_to_mesh is None:
+                        break
+                    act = _run_student_infer(tmp_npz, tmp_json)    # stochastic
+                    if os.path.exists(tmp_json): os.unlink(tmp_json)
+                    if act is None:
+                        break
+
+                    d        = np.load(tmp_npz)
+                    pcd_xyz  = d["pcd_xyz"].astype(np.float32)
+                    centroid = d["centroid"].astype(np.float32)
+                    arm = _student_arm(act, pcd_xyz, centroid)
+                    _execute_drag_path(arm, pcd_to_mesh, centroid)
+
+                    phi, comps = _flat_reward()
+                    r_t  = phi - phi_prev                          # per-step flatness improvement
+                    done = (t == T - 1)                            # artificial horizon → bootstrap stops
+                    phi_prev = phi
+                    ret += r_t
+                    _render_flat_overlay(os.path.join(_ROOT, "rl_flat_overlay.png"))
+                    print(f"[student] {traj} turn {t+1}/{T}  Φ={phi:.4f}  r={r_t:+.4f}")
+
+                    # recovery moves are a safety override, NOT a policy sample → don't train on them
+                    # (skip the buffer; clean up their temp files student_update would otherwise delete)
+                    if arm.get("recovery"):
+                        for f in (tmp_npz, act["uv_pred_path"]):
+                            try: os.unlink(f)
+                            except Exception: pass
+                        continue
+
+                    _append_buffer({
+                        "state_npz":    tmp_npz,
+                        "uv_pred_path": act["uv_pred_path"],
+                        "grab_idx":     act["grab_idx"],
+                        "waypoints":    act["waypoints"],
+                        "active":       act["active"],
+                        "log_prob":     act["log_prob"],     # behaviour log_prob (PPO ratio denominator)
+                        "reward":       r_t,                 # per-step flatness improvement
+                        "phi":          phi,
+                        "shape":        comps["shape"],
+                        "height":       comps["height"],
+                        "iou":          comps["iou"],
+                        "traj":         traj,                # GAE/returns are computed within a trajectory
+                        "t":            t,
+                        "done":         done,
+                        "episode":      episode,
+                        "branch":       k,
+                    }, buf_path)
+
+                print(f"[student] {traj} return ΣΔΦ={ret:+.4f}")
+
+            if episode % args.rl_k == 0:
+                _run_student_update(buf_path, args.rl_k * K * T)  # entries (grabs) since last update
+
+    except KeyboardInterrupt:
+        pass
+
+# ── student EVAL loop (--student-eval — watch the trained policy, greedy, no learning) ──────
+if args.student_eval and simulation_app.is_running():
+    episode = 0
+    try:
+        while simulation_app.is_running():
+            episode += 1
+            print(f"\n[eval] ══ episode {episode} (greedy) ══════════════════════════")
+            _reset_cloth()
+            _crumple()
+            r0, _ = _flat_reward(verbose=False)
+            print(f"[eval] start reward={r0:.4f}")
+
+            for turn in range(args.rl_turns):                 # sequential greedy refinement
+                if not simulation_app.is_running():
+                    break
+                tmp_npz  = f"/tmp/student_eval_ep{episode}_t{turn}.npz"
+                tmp_json = f"/tmp/student_eval_act.json"
+
+                pcd_to_mesh = _capture_rl_state(tmp_npz)
+                if pcd_to_mesh is None:
+                    break
+                act = _run_student_infer(tmp_npz, tmp_json, greedy=True)
+                if act is None:
+                    break
+
+                d        = np.load(tmp_npz)
+                pcd_xyz  = d["pcd_xyz"].astype(np.float32)
+                centroid = d["centroid"].astype(np.float32)
+                arm = _student_arm(act, pcd_xyz, centroid)
+                _execute_drag_path(arm, pcd_to_mesh, centroid)
+
+                reward, comps = _flat_reward()
+                _render_flat_overlay(os.path.join(_ROOT, "rl_flat_overlay.png"))
+                print(f"[eval] ep {episode} turn {turn+1}/{args.rl_turns}  reward={reward:.4f}  "
+                      f"shape={comps['shape']*100:.1f}cm  height={comps['height']*100:.1f}cm  iou={comps['iou']:.3f}")
+
+                for fpath in (tmp_npz, tmp_json, act["uv_pred_path"]):
+                    try: os.unlink(fpath)
+                    except Exception: pass
+
+    except KeyboardInterrupt:
+        pass
+
+# ── deterministic UV teacher (--scripted) ───────────────────────────────────────────────────
+# Replays grasp_regions.json (priority order) on every crumple: for each region, grab the visible
+# point whose PREDICTED UV is nearest the region centre and drag it to the region's flat target;
+# advance once that patch sits within --teacher-tol of its target. No VLM, no learning — a strong
+# scripted expert (UniGarmentManip-style correspondence + a human grab-order prior) that logs IL
+# samples (source="scripted") to feed BC, with the same reward (_flat_reward) the student RL uses.
+def _teacher_arc(grab_xy, release, lift):
+    """PATH_LEN waypoints: lift off the grab, carry over, descend to the release. grab_xy/release
+    are centroid-relative XY (Z absolute), matching _execute_drag_path's action frame."""
+    gx, gy = float(grab_xy[0]), float(grab_xy[1])
+    rx, ry, rz = float(release[0]), float(release[1]), float(release[2])
+    key = np.array([[gx, gy, lift],
+                    [(gx + rx) / 2.0, (gy + ry) / 2.0, lift],
+                    [rx, ry, max(lift * 0.45, rz + 0.06)],
+                    [rx, ry, rz]], dtype=np.float32)
+    return [[float(c) for c in _polyline_point(key, (j + 1) / (il_dataset.PATH_LEN + 1))]
+            for j in range(il_dataset.PATH_LEN)]
+
+
+if args.scripted and simulation_app.is_running():
+    import grasp_regions as _gr
+    regions = _gr.load(args.regions) if args.regions else _gr.load()
+    print(f"[scripted] {len(regions)} regions: " + " → ".join(r["name"] for r in regions))
+    Z_TABLE = float(FLAT_REF_PTS[:, 2].mean())
+    episode = 0
+    try:
+        while simulation_app.is_running():
+            episode += 1
+            print(f"\n[scripted] ══ episode {episode} ══════════════════════════════")
+            _reset_cloth(); _crumple()
+            before, _ = _flat_reward(verbose=False)
+
+            for ri, reg in enumerate(regions):
+                if not simulation_app.is_running():
+                    break
+                uc  = np.array(reg["uv_center"], dtype=np.float32)
+                rad = float(reg["uv_radius"])
+                tgt = np.array(reg["target_off"][:2], dtype=np.float32)
+                name = reg["name"]
+
+                for attempt in range(max(1, args.teacher_retries)):
+                    if not simulation_app.is_running():
+                        break
+                    tmp_npz = f"/tmp/scripted_ep{episode}_r{ri}_{attempt}.npz"
+                    pcd_to_mesh = _capture_rl_state(tmp_npz)
+                    if pcd_to_mesh is None:
+                        break
+                    if _run_uv_infer(tmp_npz, _UV_PRED_PATH) is None:
+                        try: os.unlink(tmp_npz)
+                        except: pass
+                        break
+                    d        = np.load(tmp_npz)
+                    pcd_xyz  = d["pcd_xyz"].astype(np.float32)   # centroid-relative
+                    centroid = d["centroid"].astype(np.float32)
+                    uv_pred  = np.load(_UV_PRED_PATH).astype(np.float32)
+
+                    # save the garment coloured by predicted UV after every inference (latest frame)
+                    try:
+                        ov = _render_uv_overlay(tmp_npz, _UV_PRED_PATH,
+                                                os.path.join(_ROOT, "rl_capture_latest.png"))
+                        print(f"[scripted] UV overlay → {ov}")
+                    except Exception as e:
+                        print(f"[scripted] WARNING: UV overlay failed: {e}")
+
+                    du   = np.linalg.norm(uv_pred - uc, axis=1)
+                    cand = np.where(du <= rad)[0]
+                    if len(cand) == 0:                        # this UV zone isn't visible — ignore it
+                        print(f"[scripted] region {ri+1}/{len(regions)} '{name}' not visible "
+                              f"(nearest uv {du.min():.2f} > r {rad:.2f}) — skip to next")
+                        try: os.unlink(tmp_npz)
+                        except: pass
+                        break
+
+                    # region 'done'? — its current patch centre already within tol of the flat target
+                    cur_err = float(np.linalg.norm(pcd_xyz[cand, :2].mean(0) - tgt))
+                    if cur_err <= args.teacher_tol:
+                        print(f"[scripted] region {ri+1}/{len(regions)} '{name}' OK "
+                              f"(err {cur_err*100:.1f}cm ≤ {args.teacher_tol*100:.0f}cm) — skip to next")
+                        try: os.unlink(tmp_npz)
+                        except: pass
+                        break
+
+                    # grab the candidate that is FURTHEST from its flat target (most useful pull)
+                    disp = np.linalg.norm(pcd_xyz[cand, :2] - tgt, axis=1)
+                    gi   = int(cand[int(disp.argmax())])
+                    grab_world = (pcd_xyz[gi] + centroid).astype(np.float32)
+                    release    = [float(tgt[0]), float(tgt[1]), Z_TABLE]
+                    path       = _teacher_arc(pcd_xyz[gi, :2], release, args.teacher_lift)
+                    arm = {"pcd_idx": gi, "grab_u": float(uv_pred[gi, 0]), "grab_v": float(uv_pred[gi, 1]),
+                           "grab_xyz": grab_world, "release": release, "path": path}
+                    print(f"[scripted] region {ri+1}/{len(regions)} '{name}' attempt {attempt+1} "
+                          f"err {cur_err*100:.1f}cm → grab uv=({arm['grab_u']:.2f},{arm['grab_v']:.2f})")
+                    _execute_drag_path(arm, pcd_to_mesh, centroid)
+
+                    if args.il:
+                        try:
+                            state  = {"pcd_xyz": pcd_xyz, "normals": d["normals"],
+                                      "uv_pred": uv_pred, "centroid": centroid}
+                            action = {"arm1": il_dataset.make_arm(
+                                          arm["grab_u"], arm["grab_v"], release, path,
+                                          grab_quat=il_dataset.IDENTITY_QUAT,
+                                          grab_xyz=grab_world, grab_pcd_idx=gi,
+                                          reasoning=f"scripted:{name}")}
+                            sid = il_dataset.record_sample(IL_DIR, "scripted", state, action,
+                                      episode=episode, turn=ri, teacher_model="uv-correspondence")
+                            print(f"[il] logged {sid}  ({il_dataset.count(IL_DIR)} samples total)")
+                        except Exception as e:
+                            print(f"[il] WARNING: failed to log sample: {e}")
+                    try: os.unlink(tmp_npz)
+                    except: pass
+
+            reward, comps = _flat_reward()
+            _render_flat_overlay(os.path.join(_ROOT, "rl_flat_overlay.png"))
+            print(f"[scripted] ep {episode} done: flat reward {before:.3f} → {reward:.3f}")
     except KeyboardInterrupt:
         pass
 

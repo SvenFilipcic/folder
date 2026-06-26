@@ -1,0 +1,187 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1420 900" font-family="'Segoe UI',Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#37474f"/></marker>
+    <marker id="ao" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#e65100"/></marker>
+    <marker id="abl" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1565c0"/></marker>
+    <marker id="apk" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#8e24aa"/></marker>
+    <style>
+      .t  { font-size:14px; fill:#102027; font-weight:600; }
+      .ti { font-size:13px; fill:#102027; font-weight:600; }
+      .s  { font-size:11px; fill:#546e7a; }
+      .m  { font-family:'DejaVu Sans Mono',Consolas,monospace; font-size:11px; fill:#1a237e; }
+      .dim{ font-family:'DejaVu Sans Mono',Consolas,monospace; font-size:10px; fill:#37474f; }
+      .e  { stroke:#37474f; stroke-width:2; fill:none; marker-end:url(#a); }
+      .eo { stroke:#e65100; stroke-width:2.5; fill:none; marker-end:url(#ao); }
+      .ebl{ stroke:#1565c0; stroke-width:2.5; fill:none; marker-end:url(#abl); }
+      .epk{ stroke:#8e24aa; stroke-width:2; fill:none; stroke-dasharray:5 3; marker-end:url(#apk); }
+    </style>
+  </defs>
+
+  <text x="40" y="38" font-size="23" font-weight="700" fill="#102027">StudentVLA — transformer policy (no pooling bottleneck) · IMPLEMENTED</text>
+  <text x="40" y="60" font-size="13" fill="#546e7a">point tokens → self-attention encoder → dense grasp read-out + DETR-style drag decoder (position + wrist rotation) + critic · variable-length paths · BC + PPO/GAE</text>
+
+  <!-- ============ 1 · TOKENIZE ============ -->
+  <rect x="28" y="92" width="232" height="330" rx="12" fill="#e8eaf6" stroke="#5c6bc0" stroke-width="2"/>
+  <text x="42" y="116" class="t">1 · Tokenize the cloud</text>
+  <rect x="44" y="128" width="200" height="44" rx="6" fill="#fff" stroke="#9fa8da"/>
+  <text x="54" y="146" class="m">state → featurize (N,9)</text>
+  <text x="54" y="162" class="s">x,y,z,u,v,nx,ny,nz,z_abs</text>
+  <rect x="44" y="180" width="200" height="40" rx="6" fill="#fff" stroke="#9fa8da"/>
+  <text x="54" y="198" class="m">FPS downsample → N=4096</text>
+  <text x="54" y="213" class="s">in head_RL (N_PCD); caps attn cost</text>
+  <rect x="44" y="228" width="200" height="40" rx="6" fill="#fff" stroke="#9fa8da"/>
+  <text x="54" y="246" class="m">Linear 9 → d (=384)</text>
+  <text x="54" y="261" class="s">per-point token embedding</text>
+  <rect x="44" y="276" width="200" height="52" rx="6" fill="#ede7f6" stroke="#7e57c2"/>
+  <text x="54" y="294" class="ti">+ positional embedding</text>
+  <text x="54" y="310" class="m">MLP(xyz) → d  (added)</text>
+  <text x="54" y="323" class="s">geometry the max-pool used to destroy</text>
+  <text x="42" y="352" class="dim">tokens X = (N, d)</text>
+  <text x="42" y="372" class="s">same pipeline for sim mesh cloud</text>
+  <text x="42" y="388" class="s">OR RealSense cloud (source-agnostic)</text>
+
+  <!-- ============ 2 · ENCODER ============ -->
+  <rect x="296" y="92" width="270" height="330" rx="12" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+  <text x="310" y="116" class="t">2 · Self-attention encoder</text>
+  <text x="310" y="133" class="s">×6 pre-norm transformer blocks</text>
+  <rect x="312" y="144" width="238" height="120" rx="8" fill="#fff" stroke="#81c784"/>
+  <text x="324" y="164" class="m">LayerNorm</text>
+  <text x="324" y="182" class="m">Multi-Head Self-Attention</text>
+  <text x="334" y="197" class="s">8 heads · every point attends to all</text>
+  <text x="334" y="211" class="s">corner ↔ corner, layer ↔ layer</text>
+  <text x="324" y="231" class="m">LayerNorm + MLP (ratio 4, GELU)</text>
+  <text x="324" y="251" class="m">+ residual</text>
+  <rect x="312" y="276" width="238" height="40" rx="8" fill="#c8e6c9" stroke="#2e7d32"/>
+  <text x="431" y="295" class="ti" text-anchor="middle">per-point features</text>
+  <text x="431" y="309" class="dim" text-anchor="middle">H = (N, d)  — nothing collapsed</text>
+  <rect x="312" y="326" width="238" height="34" rx="8" fill="#fff" stroke="#81c784"/>
+  <text x="324" y="347" class="m">mean-pool H → critic only (3c)</text>
+  <text x="310" y="384" class="s">No max-pool. Output keeps one</text>
+  <text x="310" y="400" class="s">contextualised feature per point.</text>
+
+  <!-- ============ 3a · GRASP HEAD ============ -->
+  <rect x="602" y="92" width="300" height="150" rx="12" fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
+  <text x="616" y="116" class="t">3a · GRASP — dense read-out</text>
+  <rect x="616" y="126" width="272" height="30" rx="6" fill="#fff" stroke="#ffb74d"/>
+  <text x="626" y="145" class="m">per token: Linear(d → 1) → logit</text>
+  <rect x="616" y="162" width="272" height="30" rx="6" fill="#fff" stroke="#ffb74d"/>
+  <text x="626" y="181" class="m">Categorical over the N points</text>
+  <text x="616" y="210" class="s">"grab THIS point" from full geometry —</text>
+  <text x="616" y="225" class="s">multimodal, frame-free.  UV = uv_pred[t]</text>
+
+  <!-- ============ 3c · VALUE / CRITIC HEAD ============ -->
+  <rect x="922" y="92" width="190" height="150" rx="12" fill="#fce4ec" stroke="#ad1457" stroke-width="2"/>
+  <text x="936" y="116" class="t">3c · VALUE — critic</text>
+  <rect x="936" y="126" width="162" height="48" rx="6" fill="#fff" stroke="#f48fb1"/>
+  <text x="946" y="144" class="m">mean-pool H → MLP</text>
+  <text x="946" y="162" class="m">→ V(s) scalar</text>
+  <text x="936" y="192" class="s">expected discounted</text>
+  <text x="936" y="207" class="s">flatness-return.</text>
+  <text x="936" y="222" class="s">PPO/GAE only — sample()</text>
+  <text x="936" y="236" class="s">never touches it.</text>
+
+  <!-- ============ 3b · DRAG DECODER ============ -->
+  <rect x="602" y="262" width="500" height="330" rx="12" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+  <text x="616" y="286" class="t">3b · DRAG — waypoint-query decoder (DETR-style)</text>
+
+  <!-- queries -->
+  <rect x="616" y="300" width="150" height="170" rx="8" fill="#fff" stroke="#64b5f6"/>
+  <text x="626" y="320" class="ti">K_max learned</text>
+  <text x="626" y="336" class="ti">waypoint queries</text>
+  <g font-family="monospace" font-size="11" fill="#1a237e">
+    <rect x="628" y="346" width="126" height="20" rx="4" fill="#e3f2fd" stroke="#90caf9"/><text x="636" y="360">q_release</text>
+    <rect x="628" y="370" width="126" height="20" rx="4" fill="#e3f2fd" stroke="#90caf9"/><text x="636" y="384">q_wp 1</text>
+    <rect x="628" y="394" width="126" height="20" rx="4" fill="#e3f2fd" stroke="#90caf9"/><text x="636" y="408">q_wp 2  …</text>
+    <rect x="628" y="418" width="126" height="20" rx="4" fill="#e3f2fd" stroke="#90caf9"/><text x="636" y="432">q_wp K_max</text>
+  </g>
+  <text x="626" y="458" class="s">decoded in parallel</text>
+
+  <!-- decoder blocks -->
+  <rect x="784" y="300" width="170" height="170" rx="8" fill="#fff" stroke="#64b5f6"/>
+  <text x="794" y="320" class="ti">×4 decoder blocks</text>
+  <text x="794" y="340" class="m">self-attn (queries)</text>
+  <text x="794" y="362" class="m">cross-attn → H</text>
+  <text x="804" y="377" class="s">read the geometry</text>
+  <text x="794" y="399" class="m">+ add H[t] to queries</text>
+  <text x="804" y="414" class="s">conditioned on the</text>
+  <text x="804" y="428" class="s">grabbed point</text>
+  <text x="794" y="455" class="m">MLP + residual</text>
+
+  <!-- outputs: position + stop + wrist rotation, one per query -->
+  <rect x="972" y="300" width="118" height="60" rx="8" fill="#fff" stroke="#64b5f6"/>
+  <text x="982" y="318" class="ti">position</text>
+  <text x="982" y="335" class="m">Normal(μ,σ)</text>
+  <text x="982" y="350" class="m">[x,y,z]</text>
+  <rect x="972" y="366" width="118" height="56" rx="8" fill="#ffebee" stroke="#e53935"/>
+  <text x="982" y="384" class="ti">length / stop</text>
+  <text x="982" y="401" class="m">→ k ≤ K_max</text>
+  <text x="982" y="416" class="s">variable-length</text>
+  <rect x="972" y="428" width="118" height="76" rx="8" fill="#e8f5e9" stroke="#43a047"/>
+  <text x="982" y="446" class="ti">wrist rotation</text>
+  <text x="982" y="463" class="m">Lin→6D→quat</text>
+  <text x="982" y="478" class="s">[x,y,z,w] / wp</text>
+  <text x="982" y="492" class="s">BC-only (det.)</text>
+
+  <text x="616" y="524" class="s">frame: XY rel centroid, Z abs (table=0). per active waypoint = position + wrist quaternion; grab orientation from surface normal.</text>
+  <text x="616" y="540" class="s">contiguous active prefix = path…+release — no fixed PATH_LEN; rotation excluded from RL log_prob (deterministic).</text>
+  <line x1="616" y1="550" x2="1088" y2="550" stroke="#bbdefb"/>
+  <text x="616" y="568" class="ti" fill="#1565c0">single Franka now; arm2 later = +1 grasp query +1 query set (no structural change)</text>
+  <text x="616" y="585" class="s">d=384 · 6 enc + 4 dec blocks · 8 heads · few-M params · fits RTX 4070 (12GB) beside the UV Mapper</text>
+
+  <!-- ============ 4 · EXECUTION ============ -->
+  <rect x="1138" y="92" width="250" height="332" rx="12" fill="#ede7f6" stroke="#5e35b1" stroke-width="2"/>
+  <text x="1152" y="116" class="t">4 · Execution (head_RL.py)</text>
+  <rect x="1152" y="128" width="222" height="70" rx="6" fill="#fff" stroke="#b39ddb"/>
+  <text x="1162" y="148" class="m">grasp token t → its xyz</text>
+  <text x="1162" y="164" class="m">(UV = uv_pred[t])</text>
+  <text x="1162" y="184" class="s">real point, no UV-grid round-trip</text>
+  <rect x="1152" y="208" width="222" height="106" rx="6" fill="#fff" stroke="#b39ddb"/>
+  <text x="1162" y="228" class="m">release + path + per-wp quat</text>
+  <text x="1162" y="246" class="m">→ _execute_drag_path</text>
+  <text x="1162" y="266" class="s">rotate pinned patch about a wrist</text>
+  <text x="1162" y="280" class="s">pivot 5cm above along the patch</text>
+  <text x="1162" y="294" class="s">normal; SLERP between waypoint</text>
+  <text x="1162" y="308" class="s">quats → folding arc, not a spin</text>
+  <rect x="1152" y="324" width="222" height="74" rx="6" fill="#f3e5f5" stroke="#b39ddb"/>
+  <text x="1162" y="344" class="ti">interfaces kept:</text>
+  <text x="1162" y="362" class="m">forward / sample / log_prob</text>
+  <text x="1162" y="380" class="s">training + exec code barely change</text>
+
+  <!-- edges -->
+  <path class="e"  d="M260,257 L296,257"/>
+  <path class="eo" d="M566,180 L584,180 L584,150 L602,150"/>
+  <path class="ebl" d="M566,330 L584,330 L584,360 L602,360"/>     <!-- H to drag decoder cross-attn -->
+  <text x="568" y="352" class="s" fill="#1565c0">H</text>
+  <path class="epk" d="M888,168 L920,168 L920,405 L972,405"/>     <!-- grasp token t into decoder cond -->
+  <text x="924" y="290" class="s" fill="#8e24aa" transform="rotate(90 924 290)">grab token H[t] conditions the drag</text>
+  <path class="e" d="M766,385 L784,385"/>
+  <path class="e" d="M954,340 L972,340"/>
+  <path class="eo" d="M888,150 L905,150 L905,163 L1138,163" /><!-- grasp → exec (routes above value box) -->
+  <path class="ebl" d="M1090,430 L1124,430 L1124,247 L1138,247"/> <!-- drag → exec -->
+  <path class="e" d="M431,92 L431,80 L1017,80 L1017,92"/>        <!-- encoder H → value head -->
+  <text x="1000" y="76" class="s">H</text>
+
+  <!-- ============ TRAINING BAND ============ -->
+  <rect x="28" y="620" width="1360" height="200" rx="12" fill="#fafafa" stroke="#90a4ae" stroke-width="1.5"/>
+  <text x="44" y="646" class="t" font-size="15">Training — same net, two regimes (unchanged interface)</text>
+
+  <rect x="46" y="660" width="650" height="140" rx="10" fill="#fff" stroke="#2e7d32" stroke-width="1.5"/>
+  <text x="60" y="682" class="t" fill="#2e7d32">A · Behaviour Cloning — from VR human demos</text>
+  <text x="60" y="704" class="m">grasp:  CrossEntropy( point logits , grabbed point )</text>
+  <text x="60" y="724" class="m">path :  Gaussian-NLL( waypoints , demo path[0..k] )</text>
+  <text x="60" y="744" class="m">length: BCE( stop head , true length k )</text>
+  <text x="60" y="772" class="s">demo path stored at 1 Hz (variable length) → trains the queries + stop head directly, no resampling</text>
+
+  <rect x="712" y="660" width="660" height="140" rx="10" fill="#fff" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="726" y="682" class="t" fill="#1565c0">B · PPO + GAE — multi-step smoothing in sim (per-step ΔΦ reward)</text>
+  <text x="726" y="704" class="m">sample: point ~ Categorical ; waypoints ~ Normal ; k ~ stop</text>
+  <text x="726" y="724" class="m">evaluate(): one encode → (log_prob, entropy, value V(s))</text>
+  <text x="726" y="744" class="m">loss = clip surrogate(Â) + c·(V−R)² − β·entropy</text>
+  <text x="726" y="772" class="s">GAE advantage from per-step ΔΦ; critic = value_head. greedy eval = argmax point + mean wp. (docs/STUDENT_RL.md)</text>
+
+  <text x="40" y="864" class="s">IMPLEMENTED · model/student_vla.py (transformer, no pool) · il_dataset.featurize unchanged · grasp target = point-index, path target variable-length · exec in head_RL.py · PPO critic in workers/student_update.py</text>
+</svg>

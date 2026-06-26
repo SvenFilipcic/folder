@@ -22,7 +22,7 @@ ap.add_argument("--device", default=None)
 args = ap.parse_args()
 
 device     = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-model_path = args.model  or os.path.join(_ROOT, "checkpoints", "uv_mapper_best.pth")
+model_path = args.model  or os.path.join(_ROOT, "checkpoints", "uv_mapper2_best.pth")
 
 # ── load UV Mapper (frozen) ───────────────────────────────────────────────────
 from model.uv_mapper import UVMapper
