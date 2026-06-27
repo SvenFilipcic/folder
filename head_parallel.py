@@ -34,6 +34,8 @@ parser.add_argument("--tile-pitch",  type=float, default=3.0, help="grid spacing
 parser.add_argument("--server-host", type=str,   default="127.0.0.1")
 parser.add_argument("--server-port", type=int,   default=5557)
 parser.add_argument("--gui",         action="store_true", help="open the Isaac Sim window (default headless)")
+parser.add_argument("--dump-capture", type=str, default=None, help="DEBUG: write each env's captured cloud to <DIR>/partial/*.npz in data/check_partial.py's schema (pcd_points/panel_uv/panel_id/centroid) so you can inspect what the camera actually saw (stray ground/outlier points). View: python data/check_partial.py --data <DIR> --partial-only --all --uv")
+parser.add_argument("--print", action="store_true", help="DEBUG: verbose per-step readouts — capture point counts, every socket send/recv to the inference server, and each env's grab point + world drag-to target + frame count")
 # ── garment material (calibrated Style3D real-fabric scale — identical to head_RL) ────────────
 parser.add_argument("--mass",     type=float, default=0.6)
 parser.add_argument("--density",  type=float, default=None)
@@ -108,6 +110,10 @@ import il_dataset
 import socket_ipc
 apply_style3d_nan_patch()
 
+def dbg(*a):
+    if args.print:
+        print(*a, flush=True)
+
 MESH = os.path.join(_ROOT, "assets", "garments", "majca2.usdc")
 CAM_Z, CAM_W, CAM_H, CAM_WARMUP, N_PCD = 1.0, 640, 480, 5, 4096
 CAM_FX = 24.0 / 36.0 * CAM_W
@@ -168,6 +174,7 @@ if args.bend_spec:
 
 _g = np.load(os.path.join(_ROOT, "reference", "majca_mesh_graph.npz"))
 PANEL_UV_ALL = _g["node_uv"].astype(np.float32)
+PANEL_ID_ALL = _g["node_panel"].astype(np.int32)
 _flat_ref    = np.load(os.path.join(_ROOT, "reference", "majca_flat_reference_uv.npz"))
 FLAT_REF_PTS = _flat_ref["points"].astype(np.float32)
 
@@ -323,6 +330,8 @@ def _drive_batch(targets):
 
 
 # ── capture: ONE render pass → per-env back-projected DEPTH cloud ──────────────
+_DUMP = {"n": 0}    # running index for --dump-capture filenames
+
 def capture_all(active_envs):
     """Place every active env's camera, render once, back-project each depth frame to a partial cloud
     in that env's LOCAL frame. Returns {e: {pcd_xyz,normals,centroid,pcd_to_mesh}} (skips envs with
@@ -365,13 +374,30 @@ def capture_all(active_envs):
         if len(vis_pts) < N_PCD:
             print(f"[parallel] env{e} capture: {len(vis_pts)} < {N_PCD} visible — skip", flush=True)
             continue
-        fps = furthest_point_sampling_idx(vis_pts, n_samples=N_PCD)
+        dbg(f"[print] env{e} capture: {len(vis_pts)} visible pts "
+            f"({100*len(vis_pts)/NV:.0f}% of mesh) → {N_PCD} sampled; "
+            f"centroid local=({centroid[0]:.3f},{centroid[1]:.3f},{centroid[2]:.3f})")
+        fps      = furthest_point_sampling_idx(vis_pts, n_samples=N_PCD)
+        pcd_xyz  = (vis_pts[fps] - centroid).astype(np.float32)
+        to_mesh  = vis_idx[fps].astype(np.int32)             # LOCAL vert indices into this env's slice
         out[e] = {
-            "pcd_xyz":     (vis_pts[fps] - centroid).astype(np.float32),
-            "normals":     estimate_normals((vis_pts[fps] - centroid).astype(np.float32), k=args.normal_k),
+            "pcd_xyz":     pcd_xyz,
+            "normals":     estimate_normals(pcd_xyz, k=args.normal_k),
             "centroid":    centroid,
-            "pcd_to_mesh": vis_idx[fps].astype(np.int32),    # LOCAL vert indices into this env's slice
+            "pcd_to_mesh": to_mesh,
         }
+        if args.dump_capture:
+            pdir = os.path.join(args.dump_capture, "partial")
+            os.makedirs(pdir, exist_ok=True)
+            # check_partial.py schema: pcd_points (centroid-rel) + ground-truth UV/panel from the
+            # mesh indices, so you can see exactly which cloth points the camera kept vs. dropped.
+            np.savez(os.path.join(pdir, f"cap_{_DUMP['n']:05d}.npz"),
+                     pcd_points = pcd_xyz,
+                     panel_uv   = PANEL_UV_ALL[to_mesh],
+                     panel_id   = PANEL_ID_ALL[to_mesh],
+                     centroid   = centroid,
+                     pcd_rgb    = np.zeros((len(pcd_xyz), 3), np.float32))
+            _DUMP["n"] += 1
     return out
 
 
@@ -624,8 +650,15 @@ _sock = socket_ipc.connect(args.server_host, args.server_port)
 print(f"[parallel] connected to inference server {args.server_host}:{args.server_port}", flush=True)
 
 def server(msg):
+    op = msg.get("op")
+    if args.print:
+        n = len(msg.get("states") or msg.get("entries") or []) if op in ("infer", "update") else None
+        dbg(f"[print] → localhost:{args.server_port} op={op}" + (f" items={n}" if n is not None else ""))
     socket_ipc.send_msg(_sock, msg)
     rep_ = socket_ipc.recv_msg(_sock)
+    if args.print:
+        keys = list(rep_.keys()) if isinstance(rep_, dict) else type(rep_).__name__
+        dbg(f"[print] ← localhost:{args.server_port} op={op} reply={keys}")
     if isinstance(rep_, dict) and rep_.get("error"):
         raise RuntimeError(f"server error: {rep_['error']}")
     return rep_
@@ -680,6 +713,17 @@ try:
                     drags.append((e, dg))
                     held_to_pin.append(dg["held"])
                     meta[e] = {"act": act, "centroid": centroid, "arm": arm}
+                    if args.print:
+                        tl  = TILE[e]
+                        gpt = caps[e]["pcd_xyz"][arm["pcd_idx"]] + centroid + tl   # grab point in WORLD
+                        rel = arm["release"]
+                        rw  = (centroid[0] + rel[0] + tl[0], centroid[1] + rel[1] + tl[1], rel[2])  # release WORLD
+                        end = dg["target"](1.0).mean(0)                            # patch centroid at release
+                        dbg(f"[print] env{e} grab pt#{arm['pcd_idx']} world=({gpt[0]:.3f},{gpt[1]:.3f},{gpt[2]:.3f}) "
+                            f"→ drag-to world=({rw[0]:.3f},{rw[1]:.3f},{rw[2]:.3f}) "
+                            f"[patch end ({end[0]:.3f},{end[1]:.3f},{end[2]:.3f})] "
+                            f"path={len(arm['path'])}wp held={len(dg['held'])}v frames={dg['n_frames']}"
+                            + ("  RECOVERY" if arm.get("recovery") else ""))
 
                 if not drags:
                     break
@@ -687,6 +731,8 @@ try:
 
                 # 3) drive ALL envs' patches concurrently — one step() per frame
                 max_fr = max(dg["n_frames"] for _, dg in drags)
+                dbg(f"[print] driving {len(drags)} envs concurrently for {max_fr} frames, then "
+                    f"settle {args.rl_settle}")
                 for i in range(max_fr):
                     if not simulation_app.is_running(): break
                     tgts = []
