@@ -287,7 +287,10 @@ _cam.GetHorizontalApertureAttr().Set(36.0)
 _cam.GetVerticalApertureAttr().Set(24.0)
 _cam.GetClippingRangeAttr().Set((0.01, 10.0))
 _rp = rep.create.render_product(cam_path, (CAM_W, CAM_H))
-rgb_ann = rep.AnnotatorRegistry.get_annotator("rgb"); rgb_ann.attach(_rp)
+rgb_ann   = rep.AnnotatorRegistry.get_annotator("rgb");                      rgb_ann.attach(_rp)
+# depth annotator → back-projected point cloud (matches data_gen training distribution:
+# partial, single-viewpoint, occluded cloud — NOT the full double-sided mesh, which is OOD)
+depth_ann = rep.AnnotatorRegistry.get_annotator("distance_to_image_plane"); depth_ann.attach(_rp)
 
 def place_camera(cxy):
     xf = UsdGeom.Xformable(stage.GetPrimAtPath(cam_path)); xf.ClearXformOpOrder()
@@ -399,27 +402,45 @@ def _ease(t):
 # ── 5. RL helpers ────────────────────────────────────────────────────────────────────────────
 
 def _capture_rl_state(tmp_npz):
-    """Sample point cloud from mesh verts + save RGB. Returns pcd_to_mesh or None."""
+    """Back-project the overhead DEPTH camera into a partial point cloud (matches the UV
+    Mapper's training distribution from data_gen.py) + save RGB. Returns pcd_to_mesh, or
+    None if too few points are visible this frame."""
     mesh_pts = verts()                                       # (22139, 3) exact positions
-    centroid  = mesh_pts.mean(0).astype(np.float32)
+    centroid = mesh_pts.mean(0).astype(np.float32)
 
-    # RGB capture for VLM / visualisation
     # push live cloth into the USD vis mesh — headless _render() skips this, so without it
     # the camera renders the frozen spawn-pose mesh (the "static mesh" bug)
     vmesh.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(mesh_pts))
-    place_camera(mesh_pts[:, :2].mean(0))
+    cam_pos = place_camera(mesh_pts[:, :2].mean(0))
     for _ in range(CAM_WARMUP):
         world.step(render=True); rep.orchestrator.step(pause_timeline=False)
-    rraw = rgb_ann.get_data()
-    rgb  = np.asarray(rraw.get("data", rraw) if isinstance(rraw, dict) else rraw)
-    if rgb.ndim == 3 and rgb.shape[2] == 4: rgb = rgb[:, :, :3]
+
+    raw   = depth_ann.get_data()
+    depth = np.asarray(raw.get("data", raw) if isinstance(raw, dict) else raw).squeeze()
+    rraw  = rgb_ann.get_data()
+    rgb   = np.asarray(rraw.get("data", rraw) if isinstance(rraw, dict) else rraw)
+    if rgb.ndim == 3 and rgb.shape[-1] >= 3: rgb = rgb[..., :3]
     from PIL import Image
     Image.fromarray(rgb.astype(np.uint8)).save(os.path.join(_ROOT, "rl_capture_latest.png"))
 
-    # point cloud: FPS directly on mesh vertices — no depth annotator needed
-    fps         = furthest_point_sampling_idx(mesh_pts, n_samples=N_PCD)
-    pcd_xyz     = (mesh_pts[fps] - centroid).astype(np.float32)
-    pcd_to_mesh = fps.astype(np.int32)
+    # back-project valid depth pixels → world, then NN-snap to mesh verts for pcd_to_mesh
+    valid  = np.isfinite(depth) & (depth > 0) & (depth < CAM_Z + 0.05)
+    vs, us = np.where(valid)
+    dd = depth[vs, us].astype(np.float64)
+    X  = (us - CAM_CX) / CAM_FX * dd
+    Y  = -(vs - CAM_CY) / CAM_FY * dd
+    pts_world = np.stack([X + cam_pos[0], Y + cam_pos[1], -dd + cam_pos[2]], axis=1)
+
+    nn_d, nn_i = cKDTree(mesh_pts).query(pts_world, k=1, workers=-1)
+    seen = nn_d < 0.05
+    vis_pts, vis_idx = pts_world[seen], nn_i[seen]
+    if len(vis_pts) < N_PCD:
+        print(f"[rl] capture: only {len(vis_pts)} visible pts < {N_PCD} — skipping turn")
+        return None
+
+    fps         = furthest_point_sampling_idx(vis_pts, n_samples=N_PCD)
+    pcd_xyz     = (vis_pts[fps] - centroid).astype(np.float32)
+    pcd_to_mesh = vis_idx[fps].astype(np.int32)
     normals     = estimate_normals(pcd_xyz, k=args.normal_k)
 
     np.savez(tmp_npz,
@@ -885,6 +906,7 @@ FLAT_W_SHAPE  = 1.0    # weight: 2D-aligned per-vertex XY distance to flat (shap
 FLAT_W_FLAT   = 0.5    # weight: max(0, mean(z) - table) — net lift above flat       (lie-flat term)
 FLAT_W_COV    = 0.5    # weight: top-down outline IoU vs the flat footprint          (silhouette term)
 FLAT_W_ORIENT = 0.3    # weight: garment rotation (rad) off the reference pose       (orientation term)
+FLAT_W_OOB    = 0.5    # weight: metres any active waypoint lies OUTSIDE the workspace box (box penalty)
 FLAT_GRID    = 96      # raster resolution for the outline-coverage IoU
 _TABLE_Z     = float(FLAT_REF_PTS[:, 2].mean())   # table height of the flat template
 
@@ -1024,6 +1046,26 @@ def _in_box(world_xy):
     """True where a world XY lies inside the fixed workspace box."""
     h, bx, by = args.arm_box_half, args.arm_box_cx, args.arm_box_cy
     return (np.abs(world_xy[..., 0] - bx) <= h) & (np.abs(world_xy[..., 1] - by) <= h)
+
+
+def _oob_penalty(waypoints, active, centroid):
+    """Sum (metres) of how far each ACTIVE waypoint lies OUTSIDE the workspace box — world XY plus Z.
+    The execution clamp (_clamp_wp) keeps the arm safe but gives the policy ZERO gradient about the
+    box, so the raw action mean can drift arbitrarily far out (and PPO can even push it further when a
+    clamped-to-the-wall grab gets positive advantage). This penalty is the restoring signal that pulls
+    the raw distribution back inside. Non-potential reward-shaping term: fine in the single-step phase
+    (--rl-gamma 0, no bootstrap); revisit before multi-step (breaks the exact deterministic critic)."""
+    wp = np.asarray(waypoints, np.float32)
+    ac = np.asarray(active, np.float32) > 0.5
+    if not ac.any():
+        return 0.0
+    wp = wp[ac]
+    h, bx, by = args.arm_box_half, args.arm_box_cx, args.arm_box_cy
+    wx, wy = centroid[0] + wp[:, 0], centroid[1] + wp[:, 1]
+    dx = np.clip(np.abs(wx - bx) - h, 0.0, None)
+    dy = np.clip(np.abs(wy - by) - h, 0.0, None)
+    dz = np.clip(wp[:, 2] - args.arm_box_zmax, 0.0, None) + np.clip(-wp[:, 2], 0.0, None)
+    return float((dx + dy + dz).sum())
 
 
 def _student_arm(act, pcd_xyz, centroid):
@@ -1491,12 +1533,14 @@ if args.rl_student and simulation_app.is_running():
                     _execute_drag_path(arm, pcd_to_mesh, centroid)
 
                     phi, comps = _flat_reward()
-                    r_t  = phi - phi_prev                          # per-step flatness improvement
+                    oob  = _oob_penalty(act["waypoints"], act["active"], centroid)  # box overrun (m)
+                    r_t  = (phi - phi_prev) - FLAT_W_OOB * oob     # per-step flatness improvement − box penalty
                     done = (t == T - 1)                            # artificial horizon → bootstrap stops
-                    phi_prev = phi
+                    phi_prev = phi                                 # phi stays the CLEAN potential (penalty is shaping only)
                     ret += r_t
                     _render_flat_overlay(os.path.join(_ROOT, "rl_flat_overlay.png"))
-                    print(f"[student] {traj} turn {t+1}/{T}  Φ={phi:.4f}  r={r_t:+.4f}")
+                    print(f"[student] {traj} turn {t+1}/{T}  Φ={phi:.4f}  r={r_t:+.4f}"
+                          + (f"  oob={oob:.2f}m" if oob > 0 else ""))
 
                     # recovery moves are a safety override, NOT a policy sample → don't train on them
                     # (skip the buffer; clean up their temp files student_update would otherwise delete)
