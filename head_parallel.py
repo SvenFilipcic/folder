@@ -74,7 +74,7 @@ parser.add_argument("--rl-settle",     type=int,   default=80)
 # ── RL-student (PPO+GAE) ──────────────────────────────────────────────────────
 parser.add_argument("--rl-turns",      type=int,   default=4,  help="grabs per smoothing sequence")
 parser.add_argument("--rl-group-k",    type=int,   default=4,  help="sequences branched per crumpled state")
-parser.add_argument("--rl-k",          type=int,   default=6,  help="episodes between PPO updates")
+parser.add_argument("--rl-k",          type=int,   default=1,  help="episodes between PPO updates (1 = update + save every episode; with N envs each episode is already a large batch)")
 parser.add_argument("--rl-gamma",      type=float, default=0.0)
 parser.add_argument("--rl-lambda",     type=float, default=0.95)
 parser.add_argument("--rl-clip",       type=float, default=0.2)
@@ -678,6 +678,28 @@ T = args.rl_turns
 
 buffer = []         # in-memory rollout entries → server "update"
 episode = 0
+
+def checkpoint(do_update):
+    """Optionally run a PPO update on the accumulated buffer, then always tell the server to write
+    the checkpoint. Called at the end of every episode (save) — with do_update at the rl_k cadence
+    (and on Ctrl-C, to flush the partial buffer)."""
+    global buffer
+    try:
+        if do_update and buffer:
+            print(f"[parallel] PPO+GAE update on {len(buffer)} grabs ...", flush=True)
+            res = server({"op": "update", "entries": buffer,
+                          "gamma": args.rl_gamma, "lam": args.rl_lambda, "clip": args.rl_clip,
+                          "epochs": args.rl_epochs, "minibatch": args.rl_minibatch,
+                          "ent_weight": args.rl_ent_weight, "vf_weight": args.rl_vf_weight,
+                          "det_critic": args.rl_det_critic, "phi_target": args.phi_target})
+            print(f"[parallel] update L={res['L']:.4f} reward μ={res['reward_mean']:.4f} "
+                  f"ret μ={res['ret_mean']:.4f} ({res['n_traj']} trajs × {res['n']} grabs)", flush=True)
+            buffer = []
+        server({"op": "save"})
+        print("[parallel] checkpoint saved", flush=True)
+    except Exception as ex:
+        print(f"[parallel] checkpoint failed: {ex}", flush=True)
+
 try:
     while simulation_app.is_running():
         episode += 1
@@ -773,21 +795,12 @@ try:
                 print(f"[parallel] ep{episode} k{k} turn {t+1}/{T}  Φ μ={np.mean(phis):+.4f} "
                       f"[{np.min(phis):+.3f},{np.max(phis):+.3f}]  buffer={len(buffer)}", flush=True)
 
-        # ── PPO update via the server every rl_k episodes ──
-        if episode % EPISODES_PER_UPDATE == 0 and buffer:
-            print(f"[parallel] PPO+GAE update on {len(buffer)} grabs ...", flush=True)
-            res = server({"op": "update", "entries": buffer,
-                          "gamma": args.rl_gamma, "lam": args.rl_lambda, "clip": args.rl_clip,
-                          "epochs": args.rl_epochs, "minibatch": args.rl_minibatch,
-                          "ent_weight": args.rl_ent_weight, "vf_weight": args.rl_vf_weight,
-                          "det_critic": args.rl_det_critic, "phi_target": args.phi_target})
-            print(f"[parallel] update L={res['L']:.4f} reward μ={res['reward_mean']:.4f} "
-                  f"ret μ={res['ret_mean']:.4f} ({res['n_traj']} trajs × {res['n']} grabs)", flush=True)
-            server({"op": "save"})
-            buffer = []
+        # update at the rl_k cadence (PPO batch size); SAVE after every episode either way
+        checkpoint(do_update=(episode % EPISODES_PER_UPDATE == 0))
 
 except KeyboardInterrupt:
-    pass
+    print("\n[parallel] Ctrl-C — final update + save before exit ...", flush=True)
+    checkpoint(do_update=True)
 finally:
     try: _sock.close()
     except Exception: pass
