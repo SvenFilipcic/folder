@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 parser = argparse.ArgumentParser()
 parser.add_argument("--gui",          action="store_true", help="open the Isaac window")
 parser.add_argument("--samples",      type=int, default=1,  help="number of npz samples per Isaac boot")
-parser.add_argument("--drape-frames", type=int, default=50, help="frames to drape over ball before removing it (--ball only)")
-parser.add_argument("--settle",       type=int, default=120, help="settle frames after ball removed (or flat settle if no ball)")
+parser.add_argument("--drape-frames", type=int, default=30, help="frames to drape over ball before removing it (--ball only)")
+parser.add_argument("--settle",       type=int, default=60, help="settle frames after ball removed (or flat settle if no ball)")
 parser.add_argument("--substeps", type=int, default=10,  help="Style3D substeps per frame (even for CUDA graph)")
 parser.add_argument("--iters",    type=int, default=4,   help="Style3D solver iterations")
 parser.add_argument("--mass",     type=float, default=0.2, help="TOTAL garment mass (kg) → density = mass/panel_area")
@@ -339,24 +339,68 @@ def pump(i, tag=""):
 
 # ── 4. crumple: grab-drape-drop (default) or ball (legacy --ball) ─────────────────────
 def _grab_drape_drop(tag=""):
-    """Freeze a random vertex patch near the centroid, hang the cloth, release → crumple."""
-    # restore rest pose to both state buffers
+    """Crumple the garment. Each drop draws a random mode for variety:
+        1/20  → X-tilt the flat garment ±30-90° and free-fall it (no grab)
+        6/20  → two-patch grab on actual verts, far apart (reaches sleeves; fold/twist)
+        13/20 → normal single-patch grab-drape-drop near the centroid
+    """
+    r       = int(_rng.integers(0, 20))
+    do_tilt = (r == 0)            # 1/20
+    do_two  = (1 <= r <= 6)       # 6/20  (else: single normal grab, 13/20)
+    q_new   = _q0.copy()
+
+    # tilt: rotate the flat garment about the X axis (through its centroid) by ±30-90°,
+    # then lift it back to its original floor clearance so it free-falls from the tilt.
+    if do_tilt:
+        deg  = float(_rng.uniform(30.0, 90.0)) * float(_rng.choice([-1.0, 1.0]))
+        ang  = np.deg2rad(deg)
+        cen  = _q0.mean(0)
+        c, s = np.cos(ang), np.sin(ang)
+        dy   = q_new[:, 1] - cen[1]
+        dz   = q_new[:, 2] - cen[2]
+        q_new[:, 1] = cen[1] + c * dy - s * dz
+        q_new[:, 2] = cen[2] + s * dy + c * dz
+        q_new[:, 2] += _q0[:, 2].min() - q_new[:, 2].min()   # keep floor clearance (no penetration)
+
+    # restore the (optionally tilted) pose to both buffers, zero velocity
     for _st in (s0, s1):
-        _q  = _st.particle_q.numpy();  _q[:]  = _q0;  _st.particle_q.assign(_q)
-        _qd = _st.particle_qd.numpy(); _qd[:] = _qd0; _st.particle_qd.assign(_qd)
+        _q  = _st.particle_q.numpy();  _q[:]  = q_new; _st.particle_q.assign(_q)
+        _qd = _st.particle_qd.numpy(); _qd[:] = _qd0;  _st.particle_qd.assign(_qd)
 
-    # pick a random grab center within grab_reach of the cloth centroid (XY)
-    centroid_xy = _q0[:, :2].mean(0)
-    angle = float(_rng.uniform(0, 2 * np.pi))
-    reach = float(_rng.uniform(0, args.grab_reach))
-    gc_xy = centroid_xy + reach * np.array([np.cos(angle), np.sin(angle)])
+    if do_tilt:
+        print(f"[s3d] {tag}X-tilt {deg:+.0f}° free-fall (no grab), settle {args.settle} frames...")
+        for i in range(args.settle):
+            step(); pump(i, tag + "settle ")
+        return
 
-    # find verts within a random grab radius of that center
-    grab_r = float(_rng.uniform(args.grab_radius_min, args.grab_radius_max))
-    dists  = np.linalg.norm(_q0[:, :2] - gc_xy, axis=1)
-    held   = np.where(dists <= grab_r)[0]
-    if len(held) == 0:
-        held = np.array([int(dists.argmin())])  # always grab at least 1 vert
+    # choose grab centers. two-patch grabs sit on ACTUAL garment vertices, at least half a
+    # garment apart, so they reach anywhere (sleeves included) and always grab something.
+    verts_xy = _q0[:, :2]
+    if do_two:
+        min_sep = 0.25 * float(np.linalg.norm(verts_xy.max(0) - verts_xy.min(0)))
+        c1 = verts_xy[int(_rng.integers(len(verts_xy)))]
+        c2 = c1
+        for _ in range(50):                                  # find a far-apart second center
+            cand = verts_xy[int(_rng.integers(len(verts_xy)))]
+            if np.linalg.norm(cand - c1) >= min_sep:
+                c2 = cand; break
+        centers = [c1, c2]
+    else:
+        angle   = float(_rng.uniform(0, 2 * np.pi))
+        reach   = float(_rng.uniform(0, args.grab_reach))
+        centers = [verts_xy.mean(0) + reach * np.array([np.cos(angle), np.sin(angle)])]
+
+    # build a patch per center; only keep patches that actually grabbed verts
+    patches = []
+    for gc_xy in centers:
+        grab_r = float(_rng.uniform(args.grab_radius_min, args.grab_radius_max))
+        dists  = np.linalg.norm(verts_xy - gc_xy, axis=1)
+        h      = np.where(dists <= grab_r)[0]
+        if len(h) > 0:
+            patches.append(h)
+    if not patches:                                          # nothing grabbed → nearest single vert
+        patches = [np.array([int(np.linalg.norm(verts_xy - verts_xy.mean(0), axis=1).argmin())])]
+    held = np.unique(np.concatenate(patches))
 
     # lift all particles so grab verts sit at grab_height
     lift_dz = args.grab_height - float(_q0[held, 2].mean())
@@ -371,7 +415,7 @@ def _grab_drape_drop(tag=""):
     model.particle_flags.assign(_flags)
     wp.synchronize()
 
-    print(f"[s3d] {tag}grab {len(held)} verts @ r={grab_r:.3f}m h={args.grab_height:.2f}m, "
+    print(f"[s3d] {tag}grab {len(held)} verts ({len(patches)} patch) @ h={args.grab_height:.2f}m, "
           f"drape {args.drape_frames} frames...")
     for i in range(args.drape_frames):
         step(); pump(i, tag + "drape ")
