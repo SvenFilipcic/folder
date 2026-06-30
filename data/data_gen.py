@@ -57,9 +57,9 @@ parser.add_argument("--normal-k", type=int, default=30, help="kNN for normal est
 args = parser.parse_args()
 GUI = args.gui
 
-# ── 1. Isaac FIRST ────────────────────────────────────────────────────────────────────
+# --------------------------- isaac inicializacija / importi ------------------------------------
 from isaacsim import SimulationApp
-simulation_app = SimulationApp({"headless": not GUI, "multi_gpu": False})
+simulation_app = SimulationApp({"headless": not GUI, "multi_gpu": False}) ##vedno pred isaac. importi!!
 
 import numpy as np
 import warp as wp
@@ -75,9 +75,9 @@ from utils.style3d_nan_patch import apply_style3d_nan_patch
 apply_style3d_nan_patch()   # 0/0 NaN guard for pinned-vs-pinned self-contacts
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MESH = os.path.join(_ROOT, "assets", "garments", "majca2.usdc")   # full-res garment
+MESH = os.path.join(_ROOT, "assets", "garments", "majca2.usdc")   # garment
 
-# ── overhead depth camera + capture constants ──────────────────────────────────────────
+# ------------------- kamera ---------------------------------
 CAM_Z, CAM_W, CAM_H, CAM_WARMUP, N_PCD = 1.0, 640, 480, 5, 4096
 CAM_FX = 24.0 / 36.0 * CAM_W          # focal_len/aperture * pixels (matches the USD camera below)
 CAM_FY = 24.0 / 24.0 * CAM_H
@@ -223,8 +223,8 @@ if args.ball:
 model = builder.finalize()
 
 # soft contact (cloth↔ground + self-contact), Style3D example values
-model.soft_contact_radius = 0.35e-2
-model.soft_contact_margin  = 0.45e-2
+model.soft_contact_radius = 0.75e-2
+model.soft_contact_margin  = 0.95e-2
 model.soft_contact_ke = 5
 model.soft_contact_kd = 1.0e-3
 model.soft_contact_mu = 1
@@ -459,9 +459,36 @@ for _si in range(args.samples):
         pts_world = np.stack([X + cam_pos[0], Y + cam_pos[1], -dd + cam_pos[2]], axis=1)
         rgb_v = rgb[vs, us].astype(np.float32) / 255.0
 
-        nn_d, nn_i = cKDTree(mesh_pts).query(pts_world, k=1, workers=-1)
-        seen = nn_d < 0.05
-        vis_pts, vis_idx, vis_rgb = pts_world[seen], nn_i[seen], rgb_v[seen]
+        # ── occlusion-correct vertex assignment via ray casting ──────────────────────
+        # The depth sensor only ever sees the TOP surface (z-buffer: first hit wins).
+        # KDTree threw that away and snapped to whichever vertex was closest in 3D — at a
+        # fold the HIDDEN layer is ~mm closer, so wrong UVs leaked in. Instead we resolve
+        # UV the same way the camera resolves depth: cast a ray per pixel through the mesh
+        # and take the FIRST triangle it hits. The hidden layer is occluded by construction.
+        import open3d as o3d
+        scene = o3d.t.geometry.RaycastingScene()
+        scene.add_triangles(o3d.core.Tensor(mesh_pts.astype(np.float32)),
+                            o3d.core.Tensor(tri3d.astype(np.uint32)))
+        # rays straight from the camera through each valid pixel, SAME pinhole as above
+        dirs = np.stack([(us - CAM_CX) / CAM_FX,
+                         -(vs - CAM_CY) / CAM_FY,
+                         -np.ones_like(us, dtype=np.float64)], axis=1)
+        dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+        origins = np.broadcast_to(cam_pos.astype(np.float64), dirs.shape)
+        rays = o3d.core.Tensor(np.concatenate([origins, dirs], axis=1).astype(np.float32))
+        ans  = scene.cast_rays(rays)
+        prim = ans["primitive_ids"].numpy()        # (N,) hit triangle, INVALID_ID on miss
+        bary = ans["primitive_uvs"].numpy()         # (N,2) barycentric (w1,w2); w0 = 1-w1-w2
+        hit  = prim != o3d.t.geometry.RaycastingScene.INVALID_ID
+
+        # within the hit triangle, snap to the nearest vertex (largest barycentric weight)
+        # → an EXACT mesh vertex idx, so its precomputed PANEL_UV/PANEL_ID label is exact.
+        prim_safe = np.where(hit, prim, 0)
+        tri_v     = tri3d[prim_safe]                                   # (N,3) vertex ids
+        w         = np.stack([1.0 - bary[:, 0] - bary[:, 1], bary[:, 0], bary[:, 1]], axis=1)
+        nn_i      = tri_v[np.arange(len(prim_safe)), w.argmax(1)]      # (N,) chosen vertex
+
+        vis_pts, vis_idx, vis_rgb = pts_world[hit], nn_i[hit], rgb_v[hit]
         print(f"[s3d] capture: {len(vis_pts)} visible pts ({100*len(vis_pts)/len(mesh_pts):.0f}% of {len(mesh_pts)})")
 
         if len(vis_pts) < N_PCD:
@@ -489,7 +516,7 @@ for _si in range(args.samples):
             print(f"[s3d] ✓ saved {fname} → {PART_DIR} (+ full/)")
 
 if GUI:
-    print("[s3d] keep-alive: stepping until you close the window (Ctrl-C to exit)...")
+    print("odprto dokler ne zapreš :/")
     try:
         i = 0
         while simulation_app.is_running():
