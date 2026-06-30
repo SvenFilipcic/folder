@@ -261,6 +261,3 @@ for i in indices:
 
     show(geoms, title)
 
-    if args.uv:
-        show_uv_2d(panel_uv, panel_id, name,
-                   full_uv=_full_uv, full_panel_id=_full_panel_id)
